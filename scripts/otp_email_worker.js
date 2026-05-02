@@ -33,22 +33,38 @@ export default {
     const subjMatch = raw.match(/^Subject:\s*(.+?)(?:\r?\n[^\s])/ms);
     const subject = subjMatch ? subjMatch[1].trim().slice(0, 200) : '';
 
-    // OTP extraction — semantic context first to avoid grabbing tracking ids
+    // 收件地址 + 发件地址里的数字（zone 名常含 6 位，会被 fallback regex
+    // 误抽成 OTP，比如 random@123456.example.com 这种 zone → "123456" 假阳性）
+    const addrDigits = ((to + ' ' + from).match(/\d/g) || []).join('');
+    const isFromAddr = (s) => addrDigits.length >= 6 && addrDigits.includes(s);
+
+    // OTP extraction — semantic context first to avoid grabbing tracking ids,
+    // and skip any candidate that's a substring of the address digits.
     let otp = null;
     const candidates = [
       // "code is 123456", "verification code: 123456", etc.
-      /(?:code(?:\s*is)?|verification|one[-\s]*time|verify|验证码)[^\d]{0,40}(\d{6})\b/i,
+      /(?:code(?:\s*is)?|verification|one[-\s]*time|verify|验证码)[^\d]{0,40}(\d{6})\b/gi,
       // ChatGPT subject template: "Your ChatGPT code is 123456"
-      /chatgpt[^\d]{0,40}(\d{6})/i,
-      /openai[^\d]{0,40}(\d{6})/i,
+      /chatgpt[^\d]{0,40}(\d{6})/gi,
+      /openai[^\d]{0,40}(\d{6})/gi,
     ];
+    const haystack = subject + '\n' + raw;
     for (const re of candidates) {
-      const m = (subject + '\n' + raw).match(re);
-      if (m) { otp = m[1]; break; }
+      let m;
+      while ((m = re.exec(haystack)) !== null) {
+        if (!isFromAddr(m[1])) { otp = m[1]; break; }
+      }
+      if (otp) break;
     }
     if (!otp) {
-      const m = raw.match(/\b(\d{6})\b/);
-      if (m) otp = m[1];
+      // Body-only fallback: skip header section (从第一个空行后开始) so
+      // To:/From:/Delivered-To: 里的数字不参与 fallback 匹配
+      const bodyStart = raw.search(/\r?\n\r?\n/);
+      const body = bodyStart >= 0 ? raw.slice(bodyStart) : raw;
+      const all = body.match(/\b\d{6}\b/g) || [];
+      for (const cand of all) {
+        if (!isFromAddr(cand)) { otp = cand; break; }
+      }
     }
 
     if (otp && to) {

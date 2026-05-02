@@ -77,7 +77,14 @@ class CloudflareKVOtpProvider:
                 try:
                     secrets = json.loads(sp.read_text(encoding="utf-8"))
                     cf = secrets.get("cloudflare") or {}
-                    token = token or (cf.get("api_token") or "").strip()
+                    # kv_api_token 是 KV/Workers 专用 token（实践中 DNS 用的
+                    # token 跟 KV 用的常是不同 token，权限不同），优先读它，
+                    # 落回 api_token 做兼容。
+                    token = token or (
+                        cf.get("kv_api_token")
+                        or cf.get("api_token")
+                        or ""
+                    ).strip()
                     account_id = account_id or (cf.get("account_id") or "").strip()
                     kv_id = kv_id or (cf.get("otp_kv_namespace_id") or "").strip()
                 except Exception as e:

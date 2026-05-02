@@ -5013,7 +5013,7 @@ def _exchange_refresh_token_with_session(email: str, password: str, mail_cfg: di
     def _b64url_nopad(raw: bytes) -> str:
         return _b64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-    codex_client_id = "YOUR_OPENAI_CODEX_CLIENT_ID"
+    codex_client_id = (os.getenv("OAUTH_CODEX_CLIENT_ID", "") or "").strip() or "YOUR_OPENAI_CODEX_CLIENT_ID"
     codex_redirect = "http://localhost:1455/auth/callback"
     codex_state = _b64url_nopad(_secrets.token_bytes(24))
     verifier = _b64url_nopad(_secrets.token_bytes(64))
@@ -5107,7 +5107,7 @@ def _exchange_refresh_token_with_session(email: str, password: str, mail_cfg: di
                 _log(f"      [RT] 邮箱填写失败: {e}")
                 return ""
 
-            # [3] 填密码
+            # [3] 填密码（OpenAI 现在很多场景走 passwordless，没密码框就跳过到 OTP）
             try:
                 page.wait_for_selector('input[type="password"]', state="visible", timeout=20000)
                 pwd_input = page.query_selector('input[type="password"]:visible')
@@ -5122,9 +5122,8 @@ def _exchange_refresh_token_with_session(email: str, password: str, mail_cfg: di
                         break
                 time.sleep(5)
             except Exception as e:
-                _log(f"      [RT] 密码填写失败: {e}")
-                _safe_screenshot(page, "/tmp/rt_pwd_fail.png")
-                return ""
+                _log(f"      [RT] 密码框超时（passwordless 路径），跳过到 OTP 等待: {str(e)[:80]}")
+                _safe_screenshot(page, "/tmp/rt_pwd_skip.png")
 
             # [4] 处理 OTP / Turnstile / 各种中间页
             _log(f"      [RT] 密码后 URL: {page.url[:120]}")
@@ -5194,6 +5193,49 @@ def _exchange_refresh_token_with_session(email: str, password: str, mail_cfg: di
                             except Exception:
                                 pass
                             break
+                # /add-phone 页（OpenAI 风控强制塞这一步）— 找 Skip 按钮跳过
+                if "/add-phone" in cur or "phone-number" in cur:
+                    if not getattr(page, "_addphone_dumped", False):
+                        try:
+                            _safe_screenshot(page, "/tmp/rt_addphone.png")
+                            btns = page.evaluate("""
+                                () => Array.from(document.querySelectorAll('button,a[role=button],a,[role=button]')).map(b => ({
+                                    text: (b.innerText||'').trim().slice(0,40),
+                                    href: b.href||'',
+                                    testid: b.getAttribute('data-testid')||'',
+                                    type: b.getAttribute('type')||'',
+                                    tag: b.tagName
+                                })).filter(b => b.text || b.testid)
+                            """)
+                            _log(f"      [RT] add-phone 按钮列表: {btns}")
+                            page._addphone_dumped = True
+                        except Exception:
+                            pass
+                    skipped = False
+                    for sel in [
+                        'a:has-text("Skip")', 'button:has-text("Skip")',
+                        'a:has-text("Not now")', 'button:has-text("Not now")',
+                        'a:has-text("Maybe later")', 'button:has-text("Maybe later")',
+                        'a:has-text("Skip for now")', 'button:has-text("Skip for now")',
+                        '[data-testid*="skip"]',
+                        'a[href*="skip"]',
+                    ]:
+                        try:
+                            b = page.query_selector(sel)
+                            if b and b.is_visible():
+                                b.click()
+                                _log(f"      [RT] add-phone 跳过: {sel}")
+                                skipped = True
+                                time.sleep(2)
+                                break
+                        except Exception:
+                            pass
+                    # 找不到 Skip：OpenAI 强制要求 phone 验证，本次 OAuth 必失败。
+                    # 提前 break 避免 240s 空等（caller 通过 callback 没拿到 code 判失败）。
+                    if not skipped and not getattr(page, "_addphone_gaveup", False):
+                        page._addphone_gaveup = True
+                        _log("      [RT] add-phone 找不到 Skip 按钮，提前放弃避免 240s 空等")
+                        break
                 # Codex consent 授权页 — 自动点 Authorize
                 if "/consent" in cur or "/authorize" in cur:
                     if not getattr(page, "_consent_dumped", False):
