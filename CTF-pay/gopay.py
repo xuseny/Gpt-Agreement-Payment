@@ -1045,6 +1045,42 @@ def _iter_json_message_candidates(obj: Any) -> Any:
         yield obj, None
 
 
+def _extract_explicit_otp_from_payload(
+    payload: Any,
+    *,
+    code_regex: str = DEFAULT_OTP_REGEX,
+    issued_after: float = 0.0,
+) -> str:
+    if not isinstance(payload, dict):
+        return ""
+
+    for key in ("latest", "data", "payload"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            code = _extract_explicit_otp_from_payload(
+                value,
+                code_regex=code_regex,
+                issued_after=issued_after,
+            )
+            if code:
+                return code
+
+    ts = _dict_timestamp(payload)
+    if issued_after and ts is not None and ts < issued_after:
+        return ""
+
+    for key in ("otp", "code", "verification_code", "verificationCode"):
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        code = _clean_otp_candidate(value)
+        if not code and isinstance(value, str):
+            code = _extract_otp_from_text(value, code_regex=code_regex)
+        if code:
+            return code
+    return ""
+
+
 def _extract_otp_from_payload(
     payload: Any,
     *,
@@ -1069,6 +1105,14 @@ def _extract_otp_from_payload(
         if not isinstance(target, str):
             target = json.dumps(target, ensure_ascii=False)
         return _extract_otp_from_text(target, code_regex=code_regex)
+
+    explicit = _extract_explicit_otp_from_payload(
+        payload,
+        code_regex=code_regex,
+        issued_after=issued_after,
+    )
+    if explicit:
+        return explicit
 
     found = ""
     for text, ts in _iter_json_message_candidates(payload):

@@ -475,6 +475,31 @@ def test_extract_otp_from_whatsapp_text():
     assert gopay._extract_otp_from_text(text) == "123456"
 
 
+def test_extract_otp_prefers_explicit_latest_code():
+    payload = {
+        "latest": {
+            "otp": "316277",
+            "ts": int(time.time()),
+            "text": "316277 is your verification code.",
+        },
+        "history": [{
+            "otp": "008069",
+            "ts": int(time.time()),
+            "text": "008069 is your verification code.",
+        }],
+    }
+    assert gopay._extract_otp_from_payload(payload) == "316277"
+
+
+def test_extract_otp_prefers_explicit_top_level_code_over_text():
+    payload = {
+        "otp": "316277",
+        "ts": int(time.time()),
+        "text": "old message 008069 is your verification code.",
+    }
+    assert gopay._extract_otp_from_payload(payload) == "316277"
+
+
 def test_whatsapp_file_otp_provider_reads_state(tmp_path):
     state = tmp_path / "wa_state.json"
     provider = gopay.whatsapp_file_otp_provider(
