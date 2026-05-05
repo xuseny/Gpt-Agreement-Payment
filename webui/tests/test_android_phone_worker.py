@@ -39,6 +39,31 @@ def test_extract_otp_event_from_android_notification():
     assert event["fingerprint"]
 
 
+def test_extract_otp_event_prefers_newest_notification_timestamp():
+    payload = {
+        "statusBarNotifications": [
+            {
+                "packageName": "com.whatsapp",
+                "title": "GoPay",
+                "text": "Kode verifikasi GoPay Anda adalah 407502",
+                "postTime": 1777947000000,
+            },
+            {
+                "packageName": "com.whatsapp",
+                "title": "GoPay",
+                "text": "Kode verifikasi GoPay Anda adalah 335400",
+                "postTime": 1777946000000,
+            },
+        ]
+    }
+    otp_cfg = {"package_filters": ["com.whatsapp"], "keywords": ["gopay", "kode"]}
+
+    event = phone_worker._extract_otp_event(payload, otp_cfg, now=1777947001, engine="android_adb_dumpsys")
+
+    assert event["otp"] == "407502"
+    assert event["notification_ts"] == 1777947000
+
+
 def test_should_skip_first_existing_notification():
     event = {"otp": "123456", "fingerprint": "abc", "ts": 1000}
 
@@ -51,6 +76,21 @@ def test_should_skip_first_existing_notification():
     )
 
     assert reason == "initial_existing_notification"
+
+
+def test_should_skip_older_notification_after_newer_push():
+    event = {"otp": "335400", "fingerprint": "old", "ts": 1777946000}
+    state = {"last_pushed_event_ts": 1777947000, "last_fingerprint": "newer"}
+
+    reason = phone_worker._should_skip_event(
+        event,
+        state,
+        first_scan=False,
+        ignore_existing=True,
+        dedupe_window_s=180,
+    )
+
+    assert reason == "stale_notification"
 
 
 def test_push_url_joins_base_and_path(monkeypatch):

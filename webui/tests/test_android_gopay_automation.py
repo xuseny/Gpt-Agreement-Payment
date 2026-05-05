@@ -38,6 +38,28 @@ def test_find_otp_in_notifications_filters_package_and_keywords():
     assert android_gopay._find_otp_in_notifications(payload, otp_cfg) == "112233"
 
 
+def test_find_otp_in_notifications_prefers_newest_timestamp():
+    payload = {
+        "statusBarNotifications": [
+            {
+                "packageName": "com.whatsapp",
+                "title": "GoPay",
+                "text": "Kode verifikasi GoPay Anda adalah 407502",
+                "postTime": 1777947000000,
+            },
+            {
+                "packageName": "com.whatsapp",
+                "title": "GoPay",
+                "text": "Kode verifikasi GoPay Anda adalah 335400",
+                "postTime": 1777946000000,
+            },
+        ],
+    }
+    otp_cfg = {"package_filters": ["com.whatsapp"], "keywords": ["gopay", "kode"]}
+
+    assert android_gopay._find_otp_in_notifications(payload, otp_cfg) == "407502"
+
+
 def test_config_example_uses_android_otp_command():
     cfg = json.loads((ROOT / "CTF-pay" / "config.android-gopay.example.json").read_text())
 

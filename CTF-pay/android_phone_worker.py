@@ -100,33 +100,11 @@ def _save_state(path: Path, state: dict) -> None:
 
 
 def _coerce_epoch(value: Any) -> Optional[float]:
-    if value in (None, ""):
-        return None
-    try:
-        ts = float(value)
-    except Exception:
-        return None
-    if ts <= 0:
-        return None
-    if ts > 10_000_000_000:
-        ts = ts / 1000.0
-    return ts
+    return android._coerce_epoch(value)
 
 
 def _notification_epoch(item: Any) -> Optional[float]:
-    if not isinstance(item, dict):
-        return None
-    for key in ("postTime", "post_time", "when", "timestamp", "ts", "time"):
-        ts = _coerce_epoch(item.get(key))
-        if ts is not None:
-            return ts
-    nested = item.get("notification")
-    if isinstance(nested, dict):
-        for key in ("postTime", "when", "timestamp"):
-            ts = _coerce_epoch(nested.get(key))
-            if ts is not None:
-                return ts
-    return None
+    return android._notification_epoch(item)
 
 
 def _fingerprint(code: str, package_name: str, text: str, notification_ts: Optional[float]) -> str:
@@ -138,7 +116,8 @@ def _fingerprint(code: str, package_name: str, text: str, notification_ts: Optio
 def _extract_otp_event(payload: Any, otp_cfg: dict, *, now: Optional[float] = None, engine: str = "android_appium") -> dict | None:
     now = time.time() if now is None else now
     code_regex = str(otp_cfg.get("code_regex") or android.DEFAULT_CODE_REGEX)
-    for item in reversed(list(android._iter_notifications(payload))):
+    candidates = []
+    for index, item in enumerate(list(android._iter_notifications(payload))):
         text = android._notification_text(item)
         package_name = android._notification_package(item)
         if not android._matches_filters(text, package_name, otp_cfg):
@@ -148,7 +127,7 @@ def _extract_otp_event(payload: Any, otp_cfg: dict, *, now: Optional[float] = No
             continue
         notification_ts = _notification_epoch(item)
         event_ts = notification_ts or now
-        return {
+        candidates.append({
             "otp": code,
             "ts": event_ts,
             "notification_ts": notification_ts,
@@ -157,8 +136,20 @@ def _extract_otp_event(payload: Any, otp_cfg: dict, *, now: Optional[float] = No
             "engine": engine,
             "text": text[:500],
             "fingerprint": _fingerprint(code, package_name, text, notification_ts),
-        }
-    return None
+            "_rank_has_ts": notification_ts is not None,
+            "_rank_ts": notification_ts or 0.0,
+            "_rank_index": index,
+        })
+    if not candidates:
+        return None
+    event = max(
+        candidates,
+        key=lambda item: (bool(item["_rank_has_ts"]), float(item["_rank_ts"]), int(item["_rank_index"])),
+    )
+    event.pop("_rank_has_ts", None)
+    event.pop("_rank_ts", None)
+    event.pop("_rank_index", None)
+    return event
 
 
 def _post_json(url: str, token: str, payload: dict, *, timeout: float) -> dict:
@@ -215,6 +206,12 @@ def _should_skip_event(event: dict, state: dict, *, first_scan: bool, ignore_exi
     now = float(event.get("ts") or time.time())
     if fp and fp == state.get("last_fingerprint"):
         return "duplicate_fingerprint"
+    try:
+        last_pushed_event_ts = float(state.get("last_pushed_event_ts") or 0.0)
+    except Exception:
+        last_pushed_event_ts = 0.0
+    if last_pushed_event_ts and now <= last_pushed_event_ts:
+        return "stale_notification"
     last_code = str(state.get("last_code") or "")
     try:
         last_at = float(state.get("last_pushed_at") or 0.0)
@@ -235,6 +232,7 @@ def _remember_event(path: Path, state: dict, event: dict, *, pushed: bool) -> No
     })
     if pushed:
         state["last_pushed_at"] = time.time()
+        state["last_pushed_event_ts"] = float(event.get("ts") or 0.0)
     _save_state(path, state)
 
 

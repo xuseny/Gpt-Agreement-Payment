@@ -121,6 +121,36 @@ def _notification_package(item: Any) -> str:
     return ""
 
 
+def _coerce_epoch(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        ts = float(value)
+    except Exception:
+        return None
+    if ts <= 0:
+        return None
+    if ts > 10_000_000_000:
+        ts = ts / 1000.0
+    return ts
+
+
+def _notification_epoch(item: Any) -> Optional[float]:
+    if not isinstance(item, dict):
+        return None
+    for key in ("postTime", "post_time", "when", "timestamp", "ts", "time"):
+        ts = _coerce_epoch(item.get(key))
+        if ts is not None:
+            return ts
+    nested = item.get("notification")
+    if isinstance(nested, dict):
+        for key in ("postTime", "when", "timestamp"):
+            ts = _coerce_epoch(nested.get(key))
+            if ts is not None:
+                return ts
+    return None
+
+
 def _iter_notifications(payload: Any) -> Iterable[dict]:
     if isinstance(payload, list):
         for item in payload:
@@ -149,15 +179,19 @@ def _matches_filters(text: str, package_name: str, otp_cfg: dict) -> bool:
 
 def _find_otp_in_notifications(payload: Any, otp_cfg: dict) -> str:
     code_regex = str(otp_cfg.get("code_regex") or DEFAULT_CODE_REGEX)
-    for item in reversed(list(_iter_notifications(payload))):
+    candidates = []
+    for index, item in enumerate(list(_iter_notifications(payload))):
         text = _notification_text(item)
         package_name = _notification_package(item)
         if not _matches_filters(text, package_name, otp_cfg):
             continue
         code = _extract_otp_from_text(text, code_regex=code_regex)
         if code:
-            return code
-    return ""
+            notification_ts = _notification_epoch(item)
+            candidates.append((notification_ts is not None, notification_ts or 0.0, index, code))
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda item: (item[0], item[1], item[2]))[3]
 
 
 def _import_appium():
