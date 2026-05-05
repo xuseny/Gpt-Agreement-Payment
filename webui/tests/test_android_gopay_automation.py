@@ -44,3 +44,37 @@ def test_config_example_uses_android_otp_command():
     assert cfg["gopay"]["otp"]["source"] == "command"
     assert "android_gopay_automation.py" in " ".join(cfg["gopay"]["otp"]["command"])
     assert cfg["android_automation"]["adb_serial"]
+    assert cfg["phone_worker"]["notification_source"] == "adb"
+    assert cfg["android_automation"]["otp"]["notification_source"] == "adb"
+
+
+def test_proxy_pool_normalizes_authenticated_urls():
+    proxy_cfg = {
+        "enabled": True,
+        "pool": [
+            "http://user:pass@proxy.example:18898",
+            {"host": "127.0.0.1", "port": 18899},
+        ],
+    }
+
+    value = android_gopay._select_proxy_host_port(proxy_cfg, chooser=lambda items: items[0])
+
+    assert value == "proxy.example:18898"
+
+
+def test_dumpsys_notification_payload_keeps_matching_package():
+    raw = """
+    NotificationRecord(0x1: pkg=com.whatsapp user=UserHandle{0})
+      android.title=GoPay
+      android.text=Kode verifikasi GoPay Anda 778899
+      mInterruptionTimeMs=1777951538509
+    """
+
+    payload = android_gopay._dumpsys_notification_payload(raw, {"package_filters": ["com.whatsapp"]})
+    item = payload["statusBarNotifications"][0]
+
+    assert android_gopay._find_otp_in_notifications(
+        payload,
+        {"package_filters": ["com.whatsapp"], "keywords": ["gopay", "kode"]},
+    ) == "778899"
+    assert item["postTime"] == 1777951538509

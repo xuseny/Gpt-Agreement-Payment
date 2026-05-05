@@ -209,6 +209,20 @@ output/android-phone-inspect/screen.png
 
 这一步成功，说明 ADB + Appium + UiAutomator2 已经通了。
 
+## 7.1 启动本机手机 worker
+
+如果要让服务器 WebUI 自动收到手机里的 GoPay OTP，按
+[`docs/android-phone-worker.md`](android-phone-worker.md) 配置并启动：
+
+```powershell
+python CTF-pay/android_phone_worker.py --config CTF-pay/config.android-gopay.example.json
+```
+
+这个 worker 应该在正式跑 GoPay 任务前保持常驻。
+
+默认 `notification_source=adb`，worker 不需要 Appium Settings 读取通知；如果你的手机上
+Appium Settings 闪退，保持这个默认值即可。
+
 ## 8. 验证通知 OTP 读取
 
 短测命令：

@@ -24,6 +24,7 @@ output/
 # 用户实际配置（保留 *.example.json，忽略实际填写过的）
 CTF-pay/config.paypal.json
 CTF-pay/config.paypal-*.json
+CTF-pay/config.android-gopay.local.json
 CTF-reg/config.paypal-proxy.json
 CTF-reg/config.paypal-proxy-*.json
 CTF-reg/config.noproxy.json

@@ -77,6 +77,19 @@ def test_whatsapp_settings_route_persists_engine(client):
     assert body["engine"] == "wwebjs"
 
 
+def test_whatsapp_clear_latest_otp(tmp_path, monkeypatch):
+    from webui.backend import wa_relay
+
+    monkeypatch.setenv("WEBUI_DATA_DIR", str(tmp_path))
+    wa_relay.submit_manual_otp("123456")
+    assert wa_relay.latest_otp()["otp"] == "123456"
+
+    result = wa_relay.clear_latest_otp("test")
+
+    assert result == {"cleared": True}
+    assert wa_relay.latest_otp() is None
+
+
 def test_whatsapp_session_snapshot_roundtrip(tmp_path, monkeypatch):
     from webui.backend import wa_relay
     from webui.backend.db import get_db

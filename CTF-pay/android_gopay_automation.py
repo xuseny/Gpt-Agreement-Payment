@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -176,7 +177,127 @@ def _run_adb(adb_path: str, serial: str, args: list[str], timeout: float = 20.0)
     if serial:
         cmd += ["-s", serial]
     cmd += args
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    return subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _dumpsys_notification_payload(raw: str, otp_cfg: Optional[dict] = None) -> dict:
+    text = raw or ""
+    package_filters = []
+    if isinstance(otp_cfg, dict):
+        package_filters = [str(x).lower() for x in otp_cfg.get("package_filters", []) if str(x).strip()]
+    blocks = re.split(r"\n(?=\s*(?:NotificationRecord|Notification\(|StatusBarNotification\())", text)
+    items = []
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        pkg = ""
+        match = re.search(r"\bpkg=([A-Za-z0-9_.]+)", block)
+        if not match:
+            match = re.search(r"\b(?:package|packageName|opPkg)=([A-Za-z0-9_.]+)", block)
+        if match:
+            pkg = match.group(1)
+        elif package_filters:
+            for candidate in package_filters:
+                if candidate in block.lower():
+                    pkg = candidate
+                    break
+        timestamp = None
+        for pattern in (
+            r"\bmInterruptionTimeMs=(\d{10,})",
+            r"\bpostTime=(\d{10,})",
+            r"\bwhen=(\d{10,})",
+        ):
+            ts_match = re.search(pattern, block)
+            if ts_match:
+                timestamp = int(ts_match.group(1))
+                break
+        item = {
+            "packageName": pkg,
+            "title": "adb dumpsys notification",
+            "text": block,
+            "source": "adb_dumpsys_notification",
+        }
+        if timestamp is not None:
+            item["postTime"] = timestamp
+        items.append(item)
+    if not items:
+        pkg = ""
+        for candidate in package_filters:
+            if candidate in text.lower():
+                pkg = candidate
+                break
+        items.append({
+            "packageName": pkg,
+            "title": "adb dumpsys notification",
+            "text": text,
+            "source": "adb_dumpsys_notification",
+        })
+    return {"statusBarNotifications": items}
+
+
+def _adb_notification_payload(auto_cfg: dict, otp_cfg: Optional[dict] = None) -> dict:
+    proc = _run_adb(
+        str(auto_cfg.get("adb_path") or "adb"),
+        str(auto_cfg.get("adb_serial") or ""),
+        ["shell", "dumpsys", "notification", "--noredact"],
+        timeout=20,
+    )
+    if proc.returncode != 0:
+        proc = _run_adb(
+            str(auto_cfg.get("adb_path") or "adb"),
+            str(auto_cfg.get("adb_serial") or ""),
+            ["shell", "dumpsys", "notification"],
+            timeout=20,
+        )
+    if proc.returncode != 0:
+        raise AndroidAutomationError(f"adb dumpsys notification failed: {proc.stderr or proc.stdout}")
+    return _dumpsys_notification_payload(proc.stdout or "", otp_cfg)
+
+
+def _proxy_host_port(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        for key in ("http_proxy", "host_port", "value"):
+            if value.get(key):
+                return _proxy_host_port(value.get(key))
+        if value.get("url"):
+            return _proxy_host_port(value.get("url"))
+        host = str(value.get("host") or "").strip()
+        port = str(value.get("port") or "").strip()
+        if host and port:
+            return f"{host}:{port}"
+        return ""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    m = re.match(r"^[a-zA-Z0-9+.-]+://(?:[^@/]+@)?([^/:]+):(\d+)", raw)
+    if m:
+        return f"{m.group(1)}:{m.group(2)}"
+    return raw
+
+
+def _select_proxy_host_port(proxy_cfg: dict, *, chooser=random.choice) -> str:
+    pool = proxy_cfg.get("pool") or proxy_cfg.get("proxies") or []
+    if isinstance(pool, list):
+        candidates = [_proxy_host_port(item) for item in pool]
+        candidates = [item for item in candidates if item]
+        if candidates:
+            return str(chooser(candidates))
+    return _proxy_host_port(
+        proxy_cfg.get("http_proxy")
+        or proxy_cfg.get("host_port")
+        or proxy_cfg.get("url")
+    )
 
 
 def _adb_connect(auto_cfg: dict) -> None:
@@ -184,7 +305,15 @@ def _adb_connect(auto_cfg: dict) -> None:
     if not serial or ":" not in serial:
         return
     adb_path = str(auto_cfg.get("adb_path") or "adb")
-    proc = subprocess.run([adb_path, "connect", serial], capture_output=True, text=True, timeout=20, check=False)
+    proc = subprocess.run(
+        [adb_path, "connect", serial],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+        check=False,
+    )
     if proc.returncode != 0:
         raise AndroidAutomationError(f"adb connect failed: {proc.stderr or proc.stdout}")
 
@@ -193,12 +322,7 @@ def _set_android_proxy(auto_cfg: dict) -> None:
     proxy_cfg = auto_cfg.get("proxy") or {}
     if not isinstance(proxy_cfg, dict) or not proxy_cfg.get("enabled"):
         return
-    value = str(proxy_cfg.get("http_proxy") or proxy_cfg.get("host_port") or "").strip()
-    if not value:
-        proxy_url = str(proxy_cfg.get("url") or "").strip()
-        m = re.match(r"^[a-zA-Z0-9+.-]+://(?:[^@/]+@)?([^/:]+):(\d+)", proxy_url)
-        if m:
-            value = f"{m.group(1)}:{m.group(2)}"
+    value = _select_proxy_host_port(proxy_cfg)
     if not value:
         raise AndroidAutomationError("android_automation.proxy requires http_proxy/host_port or url")
     proc = _run_adb(
@@ -365,24 +489,43 @@ def cmd_otp(args: argparse.Namespace) -> int:
     otp_cfg = _section(auto_cfg, "otp")
     timeout_s = float(args.timeout or otp_cfg.get("timeout_s", 300))
     interval_s = float(otp_cfg.get("poll_interval_s", 2))
+    notification_source = str(otp_cfg.get("notification_source") or otp_cfg.get("read_mode") or "auto").strip().lower()
     _adb_connect(auto_cfg)
-    driver = _driver(auto_cfg)
+    driver = None
+    if notification_source in ("", "auto", "appium"):
+        try:
+            driver = _driver(auto_cfg)
+        except Exception as exc:
+            if notification_source == "appium":
+                raise
+            detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+            print(f"[android-gopay] appium session failed, fallback to adb: {detail}", file=sys.stderr)
     deadline = time.time() + timeout_s
     try:
         while time.time() < deadline:
+            payload = None
             try:
-                payload = driver.execute_script("mobile: getNotifications", {})
+                if driver is not None and notification_source in ("", "auto", "appium"):
+                    payload = driver.execute_script("mobile: getNotifications", {})
+            except Exception as exc:
+                detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+                print(f"[android-gopay] appium notification poll failed: {detail}", file=sys.stderr)
+                if notification_source == "appium":
+                    payload = None
+                else:
+                    payload = _adb_notification_payload(auto_cfg, otp_cfg)
+            if payload is None and notification_source in ("auto", "adb", "dumpsys", "adb_dumpsys"):
+                payload = _adb_notification_payload(auto_cfg, otp_cfg)
+            if payload is not None:
                 code = _find_otp_in_notifications(payload, otp_cfg)
                 if code:
                     print(code)
                     return 0
-            except Exception as exc:
-                detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
-                print(f"[android-gopay] notification poll failed: {detail}", file=sys.stderr)
             time.sleep(max(0.5, interval_s))
         return 1
     finally:
-        driver.quit()
+        if driver is not None:
+            driver.quit()
 
 
 def cmd_unlink(args: argparse.Namespace) -> int:

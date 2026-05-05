@@ -279,6 +279,18 @@ def submit_manual_otp(value: str) -> dict:
     return item
 
 
+def clear_latest_otp(reason: str = "") -> dict:
+    state = _read_state()
+    had_latest = isinstance(state.get("latest"), dict) and bool(state.get("latest", {}).get("otp"))
+    state.pop("latest", None)
+    state["updated_at"] = time.time()
+    state["latest_cleared_at"] = time.time()
+    if reason:
+        state["latest_cleared_reason"] = reason
+    _write_state(state)
+    return {"cleared": had_latest}
+
+
 def latest_otp(since: float = 0.0) -> dict | None:
     latest = (_read_state().get("latest") or {})
     if not isinstance(latest, dict) or not latest.get("otp"):

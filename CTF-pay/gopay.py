@@ -558,6 +558,13 @@ class GoPayCharger:
                      "Referer": "https://merchants-gws-app.gopayapi.com/"},
             timeout=DEFAULT_TIMEOUT,
         )
+        if r.status_code != 200:
+            body = (r.text or "")[:800]
+            self.log(
+                f"[gopay] validate-otp rejected status={r.status_code} "
+                f"reference={reference_id[:8]} otp_len={len(str(otp or ''))} body={body}"
+            )
+            raise GoPayError(f"validate-otp http {r.status_code}: {body[:500]}")
         r.raise_for_status()
         data = r.json()
         if not data.get("success"):
@@ -1011,7 +1018,7 @@ def whatsapp_http_otp_provider(
     params: Optional[dict] = None,
     code_regex: str = DEFAULT_OTP_REGEX,
     json_path: str = "",
-    issued_after_slack_s: float = 15.0,
+    issued_after_slack_s: float = 2.0,
     log: Callable[[str], None] = print,
 ) -> Callable[[], str]:
     """Poll a local/owned WhatsApp relay HTTP endpoint for the latest OTP.
@@ -1141,7 +1148,7 @@ def build_configured_otp_provider(
     interval = _float_cfg(otp_cfg, "interval", _float_cfg(otp_cfg, "poll_interval_s", 1.0))
     code_regex = str(otp_cfg.get("code_regex") or DEFAULT_OTP_REGEX)
     json_path = str(otp_cfg.get("json_path") or "")
-    slack = _float_cfg(otp_cfg, "issued_after_slack_s", 15.0)
+    slack = _float_cfg(otp_cfg, "issued_after_slack_s", 2.0)
 
     env_url = os.getenv("WEBUI_GOPAY_OTP_URL", "").strip()
     url = str(otp_cfg.get("url") or otp_cfg.get("relay_url") or env_url or "").strip()

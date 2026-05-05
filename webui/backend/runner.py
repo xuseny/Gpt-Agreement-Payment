@@ -155,6 +155,10 @@ def start(*, mode: str, paypal: bool = True, batch: int = 0, workers: int = 3,
 
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
         if gopay:
+            try:
+                wa_relay.clear_latest_otp("run_start")
+            except Exception:
+                pass
             env["WEBUI_GOPAY_OTP_URL"] = wa_relay.otp_url()
         try:
             proc = subprocess.Popen(

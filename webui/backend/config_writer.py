@@ -55,6 +55,7 @@ def _project_pay(answers: dict) -> dict:
                 "source": "auto",
                 "timeout": int(gp.get("otp_timeout") or 300),
                 "interval": 1,
+                "issued_after_slack_s": 2,
             }
     if "team_plan" in answers:
         tp = answers["team_plan"] or {}
