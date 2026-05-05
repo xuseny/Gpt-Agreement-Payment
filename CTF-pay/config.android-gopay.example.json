@@ -3,6 +3,8 @@
     "country_code": "62",
     "phone_number": "81234567890",
     "pin": "YOUR_6_DIGIT_GOPAY_PIN",
+    "otp_validate_retry_limit": 2,
+    "otp_validate_retry_sleep_s": 1,
     "otp": {
       "source": "command",
       "command": [

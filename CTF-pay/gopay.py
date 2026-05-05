@@ -84,6 +84,26 @@ def _retry_after_seconds(value: str, default: float, max_sleep: float) -> float:
     return min(max_sleep, max(1.0, default))
 
 
+def _first_gopay_error(payload: Any) -> tuple[str, str, bool]:
+    if not isinstance(payload, dict):
+        return "", "", False
+    errors = payload.get("errors")
+    if isinstance(errors, dict):
+        errors = [errors]
+    if not isinstance(errors, list) or not errors:
+        return "", "", False
+    first = errors[0] if isinstance(errors[0], dict) else {}
+    code = str(first.get("code") or "")
+    message = str(
+        first.get("message_title")
+        or first.get("message")
+        or first.get("title")
+        or ""
+    )
+    retryable = bool(first.get("is_retryable") or first.get("retryable"))
+    return code, message, retryable
+
+
 # ──────────────────────────── constants ───────────────────────────
 
 # OpenAI's Midtrans merchant client id (public, embedded in JS).
@@ -105,6 +125,8 @@ LINK_RETRY_LIMIT = 2  # 406 "account already linked" retry
 LINK_RETRY_SLEEP_S = 12.0  # Midtrans 需要冷却 ~10s 才会让 406 → 201（实测）
 LINK_RATE_LIMIT_INITIAL_SLEEP_S = 5.0
 LINK_RATE_LIMIT_MAX_SLEEP_S = 5.0
+DEFAULT_OTP_VALIDATE_RETRY_LIMIT = 2
+DEFAULT_OTP_VALIDATE_RETRY_SLEEP_S = 1.0
 DEFAULT_OTP_REGEX = r"(?<!\d)(\d{6})(?!\d)"
 
 
@@ -117,6 +139,23 @@ class GoPayError(RuntimeError):
 
 class OTPCancelled(GoPayError):
     pass
+
+
+class GoPayOTPRejected(GoPayError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 0,
+        code: str = "",
+        retryable: bool = False,
+        body: str = "",
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.retryable = retryable
+        self.body = body
 
 
 class GoPayPINRejected(GoPayError):
@@ -156,6 +195,25 @@ class GoPayCharger:
         )
         self.otp_provider = otp_provider
         self.log = log
+        otp_cfg = gopay_cfg.get("otp") or gopay_cfg.get("otp_provider") or {}
+        retry_limit_raw = gopay_cfg.get(
+            "otp_validate_retry_limit",
+            otp_cfg.get("validate_retry_limit", DEFAULT_OTP_VALIDATE_RETRY_LIMIT)
+            if isinstance(otp_cfg, dict) else DEFAULT_OTP_VALIDATE_RETRY_LIMIT,
+        )
+        retry_sleep_raw = gopay_cfg.get(
+            "otp_validate_retry_sleep_s",
+            otp_cfg.get("validate_retry_sleep_s", DEFAULT_OTP_VALIDATE_RETRY_SLEEP_S)
+            if isinstance(otp_cfg, dict) else DEFAULT_OTP_VALIDATE_RETRY_SLEEP_S,
+        )
+        try:
+            self.otp_validate_retry_limit = max(0, int(retry_limit_raw))
+        except (TypeError, ValueError):
+            self.otp_validate_retry_limit = DEFAULT_OTP_VALIDATE_RETRY_LIMIT
+        try:
+            self.otp_validate_retry_sleep_s = max(0.0, float(retry_sleep_raw))
+        except (TypeError, ValueError):
+            self.otp_validate_retry_sleep_s = DEFAULT_OTP_VALIDATE_RETRY_SLEEP_S
         # Stripe runtime fingerprint (js_checksum / rv_timestamp / version) — these
         # are computed by Stripe.js client-side; replay the captured values from
         # config.runtime or HAR. Without them confirm 400.
@@ -560,15 +618,34 @@ class GoPayCharger:
         )
         if r.status_code != 200:
             body = (r.text or "")[:800]
+            try:
+                data = r.json()
+            except Exception:
+                data = None
+            code, message, retryable = _first_gopay_error(data)
             self.log(
                 f"[gopay] validate-otp rejected status={r.status_code} "
                 f"reference={reference_id[:8]} otp_len={len(str(otp or ''))} body={body}"
             )
-            raise GoPayError(f"validate-otp http {r.status_code}: {body[:500]}")
+            detail = message or body[:500]
+            raise GoPayOTPRejected(
+                f"validate-otp http {r.status_code}: {detail}",
+                status_code=r.status_code,
+                code=code,
+                retryable=retryable,
+                body=body,
+            )
         r.raise_for_status()
         data = r.json()
         if not data.get("success"):
-            raise GoPayError(f"validate-otp failed: {data}")
+            code, message, retryable = _first_gopay_error(data)
+            raise GoPayOTPRejected(
+                f"validate-otp failed: {message or data}",
+                status_code=r.status_code,
+                code=code,
+                retryable=retryable,
+                body=json.dumps(data, ensure_ascii=False)[:800],
+            )
         challenge = (
             data.get("data", {}).get("challenge", {}).get("action", {}).get("value", {})
         )
@@ -751,11 +828,27 @@ class GoPayCharger:
 
         # ── Linking: OTP + first PIN
         self._gopay_validate_reference(reference_id)
-        self._gopay_user_consent(reference_id)
-        otp = self.otp_provider()
-        if not otp:
-            raise OTPCancelled("OTP not provided")
-        challenge_id, client_id = self._gopay_validate_otp(reference_id, otp)
+        challenge_id = ""
+        client_id = ""
+        max_attempts = self.otp_validate_retry_limit + 1
+        for attempt in range(1, max_attempts + 1):
+            if attempt > 1 and self.otp_validate_retry_sleep_s:
+                time.sleep(self.otp_validate_retry_sleep_s)
+            self._gopay_user_consent(reference_id)
+            otp = self.otp_provider()
+            if not otp:
+                raise OTPCancelled("OTP not provided")
+            try:
+                challenge_id, client_id = self._gopay_validate_otp(reference_id, otp)
+                break
+            except GoPayOTPRejected as exc:
+                if not exc.retryable or attempt >= max_attempts:
+                    raise
+                self.log(
+                    f"[gopay] OTP rejected but retryable "
+                    f"code={exc.code or 'unknown'}, requesting a fresh OTP "
+                    f"attempt {attempt + 1}/{max_attempts}"
+                )
         pin_token = self._tokenize_pin(challenge_id, client_id)
         self._gopay_validate_pin(reference_id, pin_token)
 

@@ -48,6 +48,8 @@ def _project_pay(answers: dict) -> dict:
                 "country_code": str(gp["country_code"]).lstrip("+"),
                 "phone_number": str(gp["phone_number"]),
                 "pin": str(gp["pin"]),
+                "otp_validate_retry_limit": int(gp.get("otp_validate_retry_limit") or 2),
+                "otp_validate_retry_sleep_s": float(gp.get("otp_validate_retry_sleep_s") or 1),
             }
             if gp.get("midtrans_client_id"):
                 out["gopay"]["midtrans_client_id"] = gp["midtrans_client_id"]
