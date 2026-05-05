@@ -33,6 +33,24 @@
     "state_file": "output/android-phone-worker-state.json",
     "set_proxy_on_start": true,
     "clear_proxy_on_exit": false,
+    "otp_focus": {
+      "enabled": true,
+      "package": "com.whatsapp",
+      "focus_on_notification": true,
+      "notification_keywords": [
+        "gopay",
+        "gojek",
+        "otp",
+        "one-time",
+        "one time",
+        "password",
+        "kode",
+        "verifikasi",
+        "verification",
+        "code"
+      ],
+      "start_wait_s": 1
+    },
     "gopay_unlink": {
       "enabled": true,
       "run_logs_path": "/api/run/sidecar/logs",
@@ -42,6 +60,7 @@
       "ignore_existing_run_logs_on_start": true,
       "poll_interval_s": 2,
       "out_dir": "output/android-gopay-unlink",
+      "timeout_s": 120,
       "delay_after_trigger_s": 0
     }
   },
@@ -55,6 +74,17 @@
       "automationName": "UiAutomator2",
       "noReset": true,
       "newCommandTimeout": 300
+    },
+    "implicit_wait_s": 0.2,
+    "screen": {
+      "enabled": true,
+      "screen_off_timeout_ms": 2147483647,
+      "keepalive_interval_s": 30,
+      "wake_on_start": true,
+      "dismiss_keyguard": true,
+      "set_stay_on_while_plugged": true,
+      "stay_on_while_plugged_in": 3,
+      "set_screen_off_timeout": true
     },
     "proxy": {
       "enabled": false,
@@ -89,8 +119,132 @@
       "code_regex": "(?<!\\d)(\\d{6})(?!\\d)"
     },
     "gopay_unlink": {
-      "package": "com.gojek.app",
+      "package": "com.gojek.gopay",
       "activity": "",
+      "start_wait_s": 3,
+      "activate_wait_s": 2,
+      "state_max_iterations": 30,
+      "state_settle_s": 0.7,
+      "states": [
+        {
+          "name": "already_unlinked",
+          "match_any": [
+            "Successfully unlinked",
+            "No apps linked to your GoPay"
+          ],
+          "terminal": true,
+          "dump_on_enter": true,
+          "terminal_steps": [
+            {
+              "action": "dump",
+              "name": "before_exit_linked_apps"
+            },
+            {
+              "action": "back"
+            },
+            {
+              "action": "sleep",
+              "seconds": 0.5
+            },
+            {
+              "action": "back"
+            },
+            {
+              "action": "sleep",
+              "seconds": 0.3
+            },
+            {
+              "action": "press_keycode",
+              "keycode": 3
+            }
+          ]
+        },
+        {
+          "name": "unlink_confirm",
+          "match_all": [
+            "Unlink"
+          ],
+          "match_any": [
+            "Cancel",
+            "Are you sure",
+            "disconnect",
+            "konfirmasi"
+          ],
+          "steps": [
+            {
+              "action": "tap",
+              "text": "Unlink",
+              "timeout_s": 6
+            }
+          ]
+        },
+        {
+          "name": "linked_app_detail",
+          "match_any": [
+            "Unlink"
+          ],
+          "steps": [
+            {
+              "action": "tap",
+              "text": "Unlink",
+              "timeout_s": 8
+            }
+          ]
+        },
+        {
+          "name": "linked_apps",
+          "match_any": [
+            "Linked apps",
+            "Aplikasi tertaut"
+          ],
+          "steps": [
+            {
+              "action": "tap",
+              "text_contains": "Linked apps",
+              "timeout_s": 8
+            }
+          ]
+        },
+        {
+          "name": "profile_settings",
+          "match_any": [
+            "Account & app settings",
+            "Pengaturan akun"
+          ],
+          "steps": [
+            {
+              "action": "tap",
+              "text_contains": "Account & app settings",
+              "timeout_s": 8
+            }
+          ]
+        },
+        {
+          "name": "profile_tab",
+          "match_any": [
+            "Profile",
+            "Profil"
+          ],
+          "steps": [
+            {
+              "action": "tap",
+              "text_contains": "Profile",
+              "timeout_s": 5
+            }
+          ]
+        },
+        {
+          "name": "unknown_back",
+          "default": true,
+          "dump_on_enter": true,
+          "max_visits": 3,
+          "steps": [
+            {
+              "action": "back"
+            }
+          ]
+        }
+      ],
       "steps": [
         {
           "action": "dump",

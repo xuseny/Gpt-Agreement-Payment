@@ -22,6 +22,18 @@ def test_extract_otp_prefers_keyword_context():
     assert android_gopay._extract_otp_from_text(text) == "445566"
 
 
+def test_extract_otp_accepts_english_hyphenated_whatsapp_code():
+    text = "Your GoPay verification code is 123-456. Do not share this code with anyone."
+
+    assert android_gopay._extract_otp_from_text(text) == "123456"
+
+
+def test_extract_otp_ignores_fixed_five_digit_whatsapp_notification_number():
+    text = "WhatsApp 77218. Your GoPay verification code will arrive soon."
+
+    assert android_gopay._extract_otp_from_text(text) == ""
+
+
 def test_find_otp_in_notifications_filters_package_and_keywords():
     payload = {
         "statusBarNotifications": [
@@ -82,6 +94,53 @@ def test_proxy_pool_normalizes_authenticated_urls():
     value = android_gopay._select_proxy_host_port(proxy_cfg, chooser=lambda items: items[0])
 
     assert value == "proxy.example:18898"
+
+
+def test_configure_screen_awake_sends_adb_keepalive_commands(monkeypatch):
+    calls = []
+
+    class Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run_adb(_adb_path, _serial, args, timeout=20.0):
+        calls.append(args)
+        return Proc()
+
+    monkeypatch.setattr(android_gopay, "_run_adb", fake_run_adb)
+
+    commands = android_gopay._configure_screen_awake({
+        "screen": {
+            "enabled": True,
+            "screen_off_timeout_ms": 12345,
+            "stay_on_while_plugged_in": 3,
+        },
+    })
+
+    assert commands
+    assert ["shell", "input", "keyevent", "224"] in calls
+    assert ["shell", "svc", "power", "stayon", "true"] in calls
+    assert ["shell", "settings", "put", "system", "screen_off_timeout", "12345"] in calls
+
+
+def test_keep_screen_awake_wakes_and_dismisses_keyguard(monkeypatch):
+    calls = []
+
+    class Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run_adb(_adb_path, _serial, args, timeout=20.0):
+        calls.append(args)
+        return Proc()
+
+    monkeypatch.setattr(android_gopay, "_run_adb", fake_run_adb)
+
+    assert android_gopay._keep_screen_awake({"screen": {"enabled": True}})
+    assert ["shell", "input", "keyevent", "224"] in calls
+    assert ["shell", "wm", "dismiss-keyguard"] in calls
 
 
 def test_dumpsys_notification_payload_keeps_matching_package():

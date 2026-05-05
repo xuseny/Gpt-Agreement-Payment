@@ -475,6 +475,16 @@ def test_extract_otp_from_whatsapp_text():
     assert gopay._extract_otp_from_text(text) == "123456"
 
 
+def test_extract_otp_from_english_hyphenated_whatsapp_text():
+    text = "Your GoPay verification code is 123-456. Do not share this code with anyone."
+    assert gopay._extract_otp_from_text(text) == "123456"
+
+
+def test_extract_otp_ignores_fixed_five_digit_whatsapp_notification_number():
+    text = "WhatsApp 77218. Your GoPay verification code will arrive soon."
+    assert gopay._extract_otp_from_text(text) == ""
+
+
 def test_extract_otp_prefers_explicit_latest_code():
     payload = {
         "latest": {

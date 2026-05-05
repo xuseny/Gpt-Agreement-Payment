@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
@@ -33,6 +35,18 @@ DEFAULT_PUSH_PATH = "/api/whatsapp/sidecar/state"
 DEFAULT_RUN_LOGS_PATH = "/api/run/sidecar/logs"
 DEFAULT_STATE_FILE = Path("output/android-phone-worker-state.json")
 DEFAULT_GOPAY_UNLINK_TRIGGER_STRINGS = ("GoPay \u6388\u6743 + \u6263\u6b3e\u5b8c\u6210",)
+DEFAULT_OTP_FOCUS_NOTIFICATION_KEYWORDS = (
+    "gopay",
+    "gojek",
+    "otp",
+    "one-time",
+    "one time",
+    "password",
+    "kode",
+    "verifikasi",
+    "verification",
+    "code",
+)
 
 
 class PhoneWorkerError(RuntimeError):
@@ -78,6 +92,15 @@ def _gopay_unlink_worker_cfg(worker_cfg: dict) -> dict:
         return {"enabled": True}
     if not isinstance(value, dict):
         raise PhoneWorkerError("phone_worker.gopay_unlink must be an object")
+    return value
+
+
+def _otp_focus_worker_cfg(worker_cfg: dict) -> dict:
+    value = worker_cfg.get("otp_focus") or worker_cfg.get("whatsapp_focus") or {}
+    if value is True:
+        return {"enabled": True, "package": "com.whatsapp"}
+    if not isinstance(value, dict):
+        raise PhoneWorkerError("phone_worker.otp_focus must be an object")
     return value
 
 
@@ -209,6 +232,8 @@ def _post_json(url: str, token: str, payload: dict, *, timeout: float) -> dict:
         raise PhoneWorkerError(f"push failed: HTTP {exc.code} {detail[:200]}") from exc
     except urllib.error.URLError as exc:
         raise PhoneWorkerError(f"push failed: {exc}") from exc
+    except (http.client.HTTPException, OSError, TimeoutError) as exc:
+        raise PhoneWorkerError(f"push failed: {exc}") from exc
 
 
 def _get_json(url: str, token: str, *, timeout: float) -> dict:
@@ -231,6 +256,8 @@ def _get_json(url: str, token: str, *, timeout: float) -> dict:
         detail = exc.read().decode("utf-8", errors="replace")
         raise PhoneWorkerError(f"run log poll failed: HTTP {exc.code} {detail[:200]}") from exc
     except urllib.error.URLError as exc:
+        raise PhoneWorkerError(f"run log poll failed: {exc}") from exc
+    except (http.client.HTTPException, OSError, TimeoutError) as exc:
         raise PhoneWorkerError(f"run log poll failed: {exc}") from exc
 
 
@@ -263,8 +290,120 @@ def _log_entry_matches_unlink_trigger(entry: Any, trigger_strings: list[str]) ->
     return any(trigger and trigger in line for trigger in trigger_strings)
 
 
-def _run_configured_unlink(config_path: str, out_dir: str) -> int:
-    return int(android.cmd_unlink(argparse.Namespace(config=config_path, out=out_dir)))
+def _run_configured_unlink(config_path: str, out_dir: str, *, timeout_s: float = 0.0) -> int:
+    cmd = [
+        sys.executable,
+        str(HERE / "android_gopay_automation.py"),
+        "--config",
+        config_path,
+        "unlink",
+        "--out",
+        out_dir,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_s if timeout_s > 0 else None,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        for stream_name, stream in (("stdout", exc.stdout), ("stderr", exc.stderr)):
+            if stream:
+                for line in str(stream).splitlines()[-20:]:
+                    _log(f"gopay unlink {stream_name}: {line[:300]}")
+        raise PhoneWorkerError(f"gopay unlink flow timeout after {timeout_s:.1f}s") from exc
+    for stream_name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+        if stream:
+            for line in str(stream).splitlines()[-20:]:
+                _log(f"gopay unlink {stream_name}: {line[:300]}")
+    return int(proc.returncode)
+
+
+def _notification_focus_keywords(focus_cfg: dict) -> list[str]:
+    raw = focus_cfg.get("notification_keywords") or focus_cfg.get("keywords")
+    if raw is None:
+        raw = DEFAULT_OTP_FOCUS_NOTIFICATION_KEYWORDS
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    return [str(item).lower() for item in raw if str(item).strip()]
+
+
+def _extract_otp_focus_hint(
+    payload: Any,
+    otp_cfg: dict,
+    focus_cfg: dict,
+    *,
+    now: Optional[float] = None,
+    engine: str = "android_appium",
+) -> dict | None:
+    if not focus_cfg.get("enabled", False):
+        return None
+    if not focus_cfg.get("focus_on_notification", True):
+        return None
+    now = time.time() if now is None else now
+    code_regex = str(otp_cfg.get("code_regex") or android.DEFAULT_CODE_REGEX)
+    keywords = _notification_focus_keywords(focus_cfg)
+    candidates = []
+    for index, item in enumerate(list(android._iter_notifications(payload))):
+        text = android._notification_text(item)
+        package_name = android._notification_package(item)
+        if not android._matches_filters(text, package_name, otp_cfg):
+            continue
+        if android._extract_otp_from_text(text, code_regex=code_regex):
+            continue
+        text_l = text.lower()
+        if keywords and not any(keyword in text_l for keyword in keywords):
+            continue
+        notification_ts = _notification_epoch(item)
+        event_ts = notification_ts or now
+        candidates.append({
+            "otp": "",
+            "ts": event_ts,
+            "notification_ts": notification_ts,
+            "from": package_name or "android_notification",
+            "source": "android_phone_worker",
+            "engine": engine,
+            "text": text[:500],
+            "fingerprint": _fingerprint("otp-focus", package_name, text, notification_ts),
+            "_rank_has_ts": notification_ts is not None,
+            "_rank_ts": notification_ts or 0.0,
+            "_rank_index": index,
+        })
+    if not candidates:
+        return None
+    event = max(
+        candidates,
+        key=lambda item: (bool(item["_rank_has_ts"]), float(item["_rank_ts"]), int(item["_rank_index"])),
+    )
+    event.pop("_rank_has_ts", None)
+    event.pop("_rank_ts", None)
+    event.pop("_rank_index", None)
+    return event
+
+
+def _maybe_focus_otp_app(auto_cfg: dict, focus_cfg: dict, state_path: Path, state: dict, event: dict) -> None:
+    if not focus_cfg.get("enabled", False):
+        return
+    app_cfg = dict(focus_cfg)
+    app_cfg.setdefault("package", "com.whatsapp")
+    fp = str(event.get("fingerprint") or event.get("otp") or "")
+    if fp and fp == state.get("last_otp_focus_fingerprint"):
+        return
+    try:
+        android._activate_app_adb(auto_cfg, app_cfg, label="whatsapp")
+        label = f"otp {event.get('otp')}" if event.get("otp") else "otp notification"
+        _log(f"focused WhatsApp for {label}")
+        state["last_otp_focus_fingerprint"] = fp
+        state["last_otp_focus_at"] = time.time()
+        _save_state(state_path, state)
+    except Exception as exc:
+        _log(f"focus WhatsApp failed: {exc}")
 
 
 def _build_push_payload(event: dict, auto_cfg: dict) -> dict:
@@ -294,13 +433,13 @@ def _should_skip_event(event: dict, state: dict, *, first_scan: bool, ignore_exi
     now = float(event.get("ts") or time.time())
     if fp and fp == state.get("last_fingerprint"):
         return "duplicate_fingerprint"
+    last_code = str(state.get("last_code") or "")
     try:
         last_pushed_event_ts = float(state.get("last_pushed_event_ts") or 0.0)
     except Exception:
         last_pushed_event_ts = 0.0
-    if last_pushed_event_ts and now <= last_pushed_event_ts:
+    if last_pushed_event_ts and now <= last_pushed_event_ts and last_code == str(event.get("otp") or ""):
         return "stale_notification"
-    last_code = str(state.get("last_code") or "")
     try:
         last_at = float(state.get("last_pushed_at") or 0.0)
     except Exception:
@@ -358,11 +497,18 @@ def run_worker(args: argparse.Namespace) -> int:
         or "adb"
     ).strip().lower()
     appium_retry_s = float(worker_cfg.get("appium_retry_s") or 60)
+    screen_cfg = android._screen_cfg(auto_cfg)
+    screen_keepalive_interval_s = float(
+        worker_cfg.get("screen_keepalive_interval_s")
+        or screen_cfg.get("keepalive_interval_s")
+        or 30
+    )
     ignore_existing = bool(worker_cfg.get("ignore_existing_on_start", True)) and not args.push_existing
     state_path = _state_file(worker_cfg)
     state = _load_state(state_path)
     url = _push_url(worker_cfg)
     token = _relay_token(worker_cfg)
+    otp_focus_cfg = _otp_focus_worker_cfg(worker_cfg)
     unlink_worker_cfg = _gopay_unlink_worker_cfg(worker_cfg)
     auto_unlink_enabled = bool(unlink_worker_cfg.get("enabled", False))
     run_logs_url = _run_logs_url(worker_cfg, unlink_worker_cfg) if auto_unlink_enabled else ""
@@ -370,6 +516,7 @@ def run_worker(args: argparse.Namespace) -> int:
     unlink_log_limit = int(unlink_worker_cfg.get("log_limit") or 500)
     unlink_out_dir = str(unlink_worker_cfg.get("out_dir") or "output/android-gopay-unlink")
     unlink_delay_s = float(unlink_worker_cfg.get("delay_after_trigger_s") or 0)
+    unlink_timeout_s = float(unlink_worker_cfg.get("timeout_s") or 120)
     ignore_existing_run_logs = bool(unlink_worker_cfg.get("ignore_existing_run_logs_on_start", True))
     trigger_strings = [
         str(item)
@@ -386,6 +533,7 @@ def run_worker(args: argparse.Namespace) -> int:
         last_run_log_seq = 0
 
     android._adb_connect(auto_cfg)
+    android._configure_screen_awake(auto_cfg)
     if worker_cfg.get("set_proxy_on_start", True):
         android._set_android_proxy(auto_cfg)
 
@@ -395,8 +543,13 @@ def run_worker(args: argparse.Namespace) -> int:
     first_run_log_scan = True
     next_unlink_log_poll_at = 0.0
     last_unlink_log_error_at = 0.0
+    next_screen_keepalive_at = 0.0
     try:
         while True:
+            if android._screen_awake_enabled(auto_cfg) and time.time() >= next_screen_keepalive_at:
+                android._keep_screen_awake(auto_cfg)
+                next_screen_keepalive_at = time.time() + max(5.0, screen_keepalive_interval_s)
+
             if auto_unlink_enabled and time.time() >= next_unlink_log_poll_at:
                 next_unlink_log_poll_at = time.time() + max(0.5, unlink_poll_interval_s)
                 try:
@@ -453,7 +606,21 @@ def run_worker(args: argparse.Namespace) -> int:
                                     pass
                                 driver = None
                                 try:
-                                    rc = _run_configured_unlink(str(args.config), unlink_out_dir)
+                                    android._keep_screen_awake(auto_cfg)
+                                    android._activate_app_adb(
+                                        auto_cfg,
+                                        android._section(auto_cfg, "gopay_unlink"),
+                                        label="gopay",
+                                    )
+                                    _log("focused GoPay for unlink")
+                                except Exception as exc:
+                                    _log(f"focus GoPay before unlink failed: {exc}")
+                                try:
+                                    rc = _run_configured_unlink(
+                                        str(args.config),
+                                        unlink_out_dir,
+                                        timeout_s=unlink_timeout_s,
+                                    )
                                 except Exception as exc:
                                     rc = 2
                                     _log(f"gopay unlink flow failed: {exc}")
@@ -468,10 +635,10 @@ def run_worker(args: argparse.Namespace) -> int:
                         first_run_log_scan = False
                     elif first_run_log_scan:
                         first_run_log_scan = False
-                except PhoneWorkerError as exc:
+                except Exception as exc:
                     now = time.time()
                     if now - last_unlink_log_error_at >= skip_log_interval_s:
-                        _log(str(exc))
+                        _log(str(exc) if isinstance(exc, PhoneWorkerError) else f"run log poll failed: {exc}")
                         last_unlink_log_error_at = now
 
             payload = None
@@ -512,6 +679,13 @@ def run_worker(args: argparse.Namespace) -> int:
                     continue
 
             event = _extract_otp_event(payload, otp_cfg, engine=engine) if payload is not None else None
+            focus_hint = (
+                _extract_otp_focus_hint(payload, otp_cfg, otp_focus_cfg, engine=engine)
+                if payload is not None
+                else None
+            )
+            if focus_hint is not None and not (first_scan and ignore_existing):
+                _maybe_focus_otp_app(auto_cfg, otp_focus_cfg, state_path, state, focus_hint)
 
             if not event:
                 if args.once:
@@ -552,6 +726,8 @@ def run_worker(args: argparse.Namespace) -> int:
                 first_scan = False
                 time.sleep(max(0.5, interval_s))
                 continue
+
+            _maybe_focus_otp_app(auto_cfg, otp_focus_cfg, state_path, state, event)
 
             delay_remaining_s = 0.0 if args.force else _push_delay_remaining(event, push_delay_s)
             if delay_remaining_s > 0:

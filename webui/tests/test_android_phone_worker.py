@@ -64,6 +64,65 @@ def test_extract_otp_event_prefers_newest_notification_timestamp():
     assert event["notification_ts"] == 1777947000
 
 
+def test_extract_otp_event_ignores_fixed_five_digit_whatsapp_notification_number():
+    payload = {
+        "statusBarNotifications": [
+            {
+                "packageName": "com.whatsapp",
+                "title": "WhatsApp",
+                "text": "WhatsApp 77218. Your GoPay verification code will arrive soon.",
+                "postTime": 1777947000000,
+            },
+        ]
+    }
+    otp_cfg = {"package_filters": ["com.whatsapp"], "keywords": ["whatsapp", "gopay", "verification"]}
+
+    assert phone_worker._extract_otp_event(payload, otp_cfg, now=1777947001, engine="android_adb_dumpsys") is None
+
+
+def test_extract_otp_focus_hint_for_sensitive_whatsapp_otp():
+    payload = {
+        "statusBarNotifications": [
+            {
+                "packageName": "com.whatsapp",
+                "title": "GoPay",
+                "text": "You received a one-time password. Open WhatsApp to view it.",
+                "postTime": 1777947000000,
+            },
+        ]
+    }
+    otp_cfg = {"package_filters": ["com.whatsapp"], "keywords": ["whatsapp", "gopay", "kode"]}
+
+    event = phone_worker._extract_otp_focus_hint(
+        payload,
+        otp_cfg,
+        {"enabled": True},
+        now=1777947001,
+        engine="android_adb_dumpsys",
+    )
+
+    assert event["otp"] == ""
+    assert event["from"] == "com.whatsapp"
+    assert event["engine"] == "android_adb_dumpsys"
+    assert event["notification_ts"] == 1777947000
+    assert event["fingerprint"]
+
+
+def test_extract_otp_focus_hint_skips_notifications_with_code():
+    payload = {
+        "statusBarNotifications": [
+            {
+                "packageName": "com.whatsapp",
+                "title": "GoPay",
+                "text": "Kode verifikasi GoPay Anda adalah 123456",
+            },
+        ]
+    }
+    otp_cfg = {"package_filters": ["com.whatsapp"], "keywords": ["whatsapp", "gopay", "kode"]}
+
+    assert phone_worker._extract_otp_focus_hint(payload, otp_cfg, {"enabled": True}) is None
+
+
 def test_should_skip_first_existing_notification():
     event = {"otp": "123456", "fingerprint": "abc", "ts": 1000}
 
@@ -80,7 +139,7 @@ def test_should_skip_first_existing_notification():
 
 def test_should_skip_older_notification_after_newer_push():
     event = {"otp": "335400", "fingerprint": "old", "ts": 1777946000}
-    state = {"last_pushed_event_ts": 1777947000, "last_fingerprint": "newer"}
+    state = {"last_pushed_event_ts": 1777947000, "last_fingerprint": "newer", "last_code": "335400"}
 
     reason = phone_worker._should_skip_event(
         event,
@@ -91,6 +150,37 @@ def test_should_skip_older_notification_after_newer_push():
     )
 
     assert reason == "stale_notification"
+
+
+def test_should_not_skip_new_code_with_older_notification_timestamp():
+    event = {"otp": "335400", "fingerprint": "old", "ts": 1777946000}
+    state = {"last_pushed_event_ts": 1777947000, "last_fingerprint": "newer", "last_code": "407502"}
+
+    reason = phone_worker._should_skip_event(
+        event,
+        state,
+        first_scan=False,
+        ignore_existing=True,
+        dedupe_window_s=180,
+    )
+
+    assert reason == ""
+
+
+def test_get_json_wraps_remote_disconnect(monkeypatch):
+    import http.client
+
+    def raise_remote_disconnected(*_args, **_kwargs):
+        raise http.client.RemoteDisconnected("closed")
+
+    monkeypatch.setattr(phone_worker.urllib.request, "urlopen", raise_remote_disconnected)
+
+    try:
+        phone_worker._get_json("http://example.test/logs", "token", timeout=1)
+    except phone_worker.PhoneWorkerError as exc:
+        assert "run log poll failed" in str(exc)
+    else:
+        raise AssertionError("expected PhoneWorkerError")
 
 
 def test_push_delay_remaining_waits_after_notification_timestamp():

@@ -19,12 +19,13 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 
 DEFAULT_CONFIG = Path(__file__).with_name("config.android-gopay.example.json")
 DEFAULT_CODE_REGEX = r"(?<!\d)(\d{6})(?!\d)"
 DEFAULT_KEYWORDS = ("gopay", "gojek", "whatsapp", "otp", "kode", "verifikasi", "verification", "code")
+_OTP_CONTEXT_RE = r"otp|one[-\s]*time|password|verification|verify|code|kode|verifikasi|gopay|gojek"
 
 
 class AndroidAutomationError(RuntimeError):
@@ -50,13 +51,28 @@ def _automation_cfg(cfg: dict) -> dict:
     return _section(cfg, "android_automation")
 
 
+def _candidate_digits(value: Any) -> str:
+    return re.sub(r"\D", "", str(value or ""))
+
+
+def _code_regex_accepts(digits: str, code_regex: str = DEFAULT_CODE_REGEX) -> bool:
+    if not digits:
+        return False
+    pattern = code_regex or DEFAULT_CODE_REGEX
+    try:
+        return bool(re.fullmatch(pattern, digits))
+    except re.error:
+        return bool(re.fullmatch(DEFAULT_CODE_REGEX, digits))
+
+
 def _extract_otp_from_text(text: str, code_regex: str = DEFAULT_CODE_REGEX) -> str:
     if not text:
         return ""
     patterns = [
-        r"(?:otp|one[-\s]*time|verification|verify|code|kode|verifikasi|gopay|gojek|whatsapp)[^\d]{0,100}(\d{4,8})(?!\d)",
-        r"(?<!\d)(\d{4,8})(?!\d)[^\n\r]{0,100}(?:otp|one[-\s]*time|verification|verify|code|kode|verifikasi|gopay|gojek)",
         code_regex or DEFAULT_CODE_REGEX,
+        r"(?<!\d)((?:\d[\s.-]?){6})(?!\d)",
+        rf"(?:{_OTP_CONTEXT_RE})[^\d]{{0,100}}((?:\d[\s.-]?){{6}})(?!\d)",
+        rf"(?<!\d)((?:\d[\s.-]?){{6}})[^\n\r]{{0,100}}(?:{_OTP_CONTEXT_RE})",
     ]
     for pattern in patterns:
         try:
@@ -66,8 +82,8 @@ def _extract_otp_from_text(text: str, code_regex: str = DEFAULT_CODE_REGEX) -> s
         for match in reversed(matches):
             groups = match.groups() or (match.group(0),)
             for group in reversed(groups):
-                digits = re.sub(r"\D", "", str(group or ""))
-                if 4 <= len(digits) <= 8:
+                digits = _candidate_digits(group)
+                if _code_regex_accepts(digits, code_regex=code_regex):
                     return digits
     return ""
 
@@ -389,6 +405,122 @@ def _clear_android_proxy(auto_cfg: dict) -> None:
     )
 
 
+def _screen_cfg(auto_cfg: dict) -> dict:
+    value = auto_cfg.get("screen") or auto_cfg.get("keep_awake") or {}
+    if value is True:
+        return {"enabled": True}
+    if not isinstance(value, dict):
+        return {}
+    return value
+
+
+def _screen_awake_enabled(auto_cfg: dict) -> bool:
+    cfg = _screen_cfg(auto_cfg)
+    return bool(cfg.get("enabled") or cfg.get("keep_awake"))
+
+
+def _adb_best_effort(auto_cfg: dict, args: list[str], *, timeout: float = 10.0) -> bool:
+    try:
+        proc = _run_adb(
+            str(auto_cfg.get("adb_path") or "adb"),
+            str(auto_cfg.get("adb_serial") or ""),
+            args,
+            timeout=timeout,
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _configure_screen_awake(auto_cfg: dict) -> list[list[str]]:
+    """Best-effort screen keep-awake setup.
+
+    Some Android builds do not expose a UI "never sleep" option. These ADB
+    commands keep the device awake while the worker is running and periodically
+    wake it back up if OEM power management still dims the display.
+    """
+    if not _screen_awake_enabled(auto_cfg):
+        return []
+    cfg = _screen_cfg(auto_cfg)
+    timeout_ms = int(cfg.get("screen_off_timeout_ms") or cfg.get("timeout_ms") or 2_147_483_647)
+    stay_on_value = str(cfg.get("stay_on_while_plugged_in") or cfg.get("stay_on_value") or "3")
+    commands: list[list[str]] = []
+    if cfg.get("wake_on_start", True):
+        commands.append(["shell", "input", "keyevent", str(cfg.get("wake_keycode") or 224)])
+    if cfg.get("dismiss_keyguard", True):
+        commands.append(["shell", "wm", "dismiss-keyguard"])
+    if cfg.get("set_stay_on_while_plugged", True):
+        commands.append(["shell", "svc", "power", "stayon", "true"])
+        commands.append(["shell", "settings", "put", "global", "stay_on_while_plugged_in", stay_on_value])
+    if cfg.get("set_screen_off_timeout", True):
+        commands.append(["shell", "settings", "put", "system", "screen_off_timeout", str(timeout_ms)])
+    for command in commands:
+        _adb_best_effort(auto_cfg, command)
+    return commands
+
+
+def _keep_screen_awake(auto_cfg: dict) -> bool:
+    if not _screen_awake_enabled(auto_cfg):
+        return False
+    cfg = _screen_cfg(auto_cfg)
+    ok = _adb_best_effort(
+        auto_cfg,
+        ["shell", "input", "keyevent", str(cfg.get("wake_keycode") or 224)],
+        timeout=5.0,
+    )
+    if cfg.get("dismiss_keyguard", True):
+        _adb_best_effort(auto_cfg, ["shell", "wm", "dismiss-keyguard"], timeout=5.0)
+    return ok
+
+
+def _app_package(app_cfg: Optional[dict], default: str = "") -> str:
+    if not isinstance(app_cfg, dict):
+        return default
+    return str(app_cfg.get("package") or app_cfg.get("app_package") or default or "").strip()
+
+
+def _app_activity(app_cfg: Optional[dict], default: str = "") -> str:
+    if not isinstance(app_cfg, dict):
+        return default
+    return str(app_cfg.get("activity") or app_cfg.get("app_activity") or default or "").strip()
+
+
+def _activate_app_adb(auto_cfg: dict, app_cfg: dict, *, label: str = "app") -> None:
+    package = _app_package(app_cfg)
+    if not package:
+        return
+    activity = _app_activity(app_cfg)
+    if activity:
+        component = f"{package}/{activity}"
+        args = ["shell", "am", "start", "-n", component]
+    else:
+        args = ["shell", "monkey", "-p", package, "-c", "android.intent.category.LAUNCHER", "1"]
+    proc = _run_adb(
+        str(auto_cfg.get("adb_path") or "adb"),
+        str(auto_cfg.get("adb_serial") or ""),
+        args,
+        timeout=float(app_cfg.get("start_timeout_s") or 20),
+    )
+    if proc.returncode != 0:
+        raise AndroidAutomationError(f"activate {label} failed: {proc.stderr or proc.stdout}")
+    delay_s = float(app_cfg.get("start_wait_s") or app_cfg.get("activate_wait_s") or 1.5)
+    if delay_s > 0:
+        time.sleep(delay_s)
+
+
+def _activate_app_driver(driver: Any, app_cfg: dict, *, label: str = "app") -> None:
+    package = _app_package(app_cfg)
+    if not package:
+        return
+    try:
+        driver.activate_app(package)
+    except Exception as exc:
+        raise AndroidAutomationError(f"activate {label} via Appium failed: {exc}") from exc
+    delay_s = float(app_cfg.get("activate_wait_s") or app_cfg.get("start_wait_s") or 1.0)
+    if delay_s > 0:
+        time.sleep(delay_s)
+
+
 def _driver(auto_cfg: dict, *, app_cfg: Optional[dict] = None):
     webdriver, UiAutomator2Options, _AppiumBy = _import_appium()
     caps = dict(auto_cfg.get("capabilities") or {})
@@ -398,16 +530,23 @@ def _driver(auto_cfg: dict, *, app_cfg: Optional[dict] = None):
     if auto_cfg.get("adb_serial"):
         caps.setdefault("udid", auto_cfg.get("adb_serial"))
     if app_cfg:
-        if app_cfg.get("package"):
-            caps.setdefault("appPackage", app_cfg["package"])
-        if app_cfg.get("activity"):
-            caps.setdefault("appActivity", app_cfg["activity"])
+        package = _app_package(app_cfg)
+        activity = _app_activity(app_cfg)
+        if package:
+            caps.setdefault("appPackage", package)
+        if activity:
+            caps.setdefault("appActivity", activity)
     options = UiAutomator2Options()
     options.load_capabilities(caps)
-    return webdriver.Remote(
+    driver = webdriver.Remote(
         command_executor=str(auto_cfg.get("appium_server_url") or "http://127.0.0.1:4723"),
         options=options,
     )
+    try:
+        driver.implicitly_wait(float(auto_cfg.get("implicit_wait_s", 0.2)))
+    except Exception:
+        pass
+    return driver
 
 
 def _resource_id(package_name: str, value: str) -> str:
@@ -423,6 +562,13 @@ class StepRunner:
     driver: Any
     appium_by: Any
     default_package: str = ""
+    log: Optional[Callable[[str], None]] = None
+
+    def _log(self, message: str) -> None:
+        if self.log:
+            self.log(message)
+        else:
+            print(f"[android-gopay] {message}", flush=True)
 
     def _find(self, step: dict):
         timeout = float(step.get("timeout_s", 20))
@@ -438,16 +584,26 @@ class StepRunner:
                     return self.driver.find_element(self.appium_by.ACCESSIBILITY_ID, str(step["accessibility_id"]))
                 if step.get("text"):
                     escaped = str(step["text"]).replace('"', '\\"')
-                    return self.driver.find_element(
-                        self.appium_by.ANDROID_UIAUTOMATOR,
-                        f'new UiSelector().text("{escaped}")',
-                    )
+                    selectors = [f'new UiSelector().text("{escaped}")']
+                    if step.get("match_content_desc", step.get("match_description", True)):
+                        selectors.append(f'new UiSelector().description("{escaped}")')
+                    for selector in selectors:
+                        try:
+                            return self.driver.find_element(self.appium_by.ANDROID_UIAUTOMATOR, selector)
+                        except Exception as exc:
+                            last_exc = exc
+                    raise last_exc
                 if step.get("text_contains"):
                     escaped = str(step["text_contains"]).replace('"', '\\"')
-                    return self.driver.find_element(
-                        self.appium_by.ANDROID_UIAUTOMATOR,
-                        f'new UiSelector().textContains("{escaped}")',
-                    )
+                    selectors = [f'new UiSelector().textContains("{escaped}")']
+                    if step.get("match_content_desc", step.get("match_description", True)):
+                        selectors.append(f'new UiSelector().descriptionContains("{escaped}")')
+                    for selector in selectors:
+                        try:
+                            return self.driver.find_element(self.appium_by.ANDROID_UIAUTOMATOR, selector)
+                        except Exception as exc:
+                            last_exc = exc
+                    raise last_exc
                 if step.get("description_contains"):
                     escaped = str(step["description_contains"]).replace('"', '\\"')
                     return self.driver.find_element(
@@ -471,6 +627,39 @@ class StepRunner:
                 return False
             time.sleep(0.4)
 
+    def _state_matches(self, state: dict, source: str) -> bool:
+        if state.get("default"):
+            return False
+        any_values = [str(x) for x in (state.get("match_any") or state.get("values") or []) if str(x)]
+        all_values = [str(x) for x in (state.get("match_all") or []) if str(x)]
+        none_values = [str(x) for x in (state.get("match_none") or []) if str(x)]
+        contains = str(state.get("text_contains") or "").strip()
+        exact = str(state.get("text") or "").strip()
+        if exact:
+            any_values.append(f'text="{exact}"')
+        if contains:
+            any_values.append(contains)
+        if none_values and any(v in source for v in none_values):
+            return False
+        if all_values and not all(v in source for v in all_values):
+            return False
+        if any_values and not any(v in source for v in any_values):
+            return False
+        return bool(any_values or all_values)
+
+    def _detect_state(self, states: list[dict]) -> dict | None:
+        source = self.driver.page_source or ""
+        default_state = None
+        for state in states:
+            if not isinstance(state, dict):
+                continue
+            if state.get("default"):
+                default_state = state
+                continue
+            if self._state_matches(state, source):
+                return state
+        return default_state
+
     def _dump(self, out_dir: Path, name: str) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / f"{name}.xml").write_text(self.driver.page_source, encoding="utf-8")
@@ -485,6 +674,7 @@ class StepRunner:
                 raise AndroidAutomationError(f"step #{idx} must be an object")
             action = str(step.get("action") or "").strip().lower()
             name = str(step.get("name") or f"step_{idx:02d}")
+            self._log(f"step={name} action={action}")
             if action == "sleep":
                 time.sleep(float(step.get("seconds", 1)))
             elif action == "tap":
@@ -522,11 +712,57 @@ class StepRunner:
             else:
                 raise AndroidAutomationError(f"unsupported action in step #{idx}: {action}")
 
+    def run_states(
+        self,
+        states: list[dict],
+        *,
+        out_dir: Path,
+        max_iterations: int = 30,
+        settle_s: float = 0.6,
+    ) -> dict:
+        if not isinstance(states, list) or not states:
+            raise AndroidAutomationError("state flow requires a non-empty states list")
+        history: list[str] = []
+        visits: dict[str, int] = {}
+        for iteration in range(1, max(1, int(max_iterations)) + 1):
+            state = self._detect_state(states)
+            if not state:
+                self._dump(out_dir, f"unknown_{iteration:02d}")
+                raise AndroidAutomationError("unable to classify current GoPay page")
+            name = str(state.get("name") or f"state_{iteration:02d}")
+            history.append(name)
+            visits[name] = visits.get(name, 0) + 1
+            self._log(f"state={name} iteration={iteration} visits={visits[name]}")
+            if state.get("dump_on_enter"):
+                safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "state"
+                self._dump(out_dir, f"state_{iteration:02d}_{safe_name}")
+            if state.get("terminal"):
+                steps = state.get("terminal_steps") or state.get("exit_steps") or state.get("steps") or state.get("actions") or []
+                if isinstance(steps, list) and steps:
+                    self._log(f"terminal_state={name} cleanup_steps={len(steps)}")
+                    self.run(steps, out_dir=out_dir)
+                    delay_s = float(state.get("settle_s") or settle_s)
+                    if delay_s > 0:
+                        time.sleep(delay_s)
+                return {"terminal_state": name, "iterations": iteration, "history": history}
+            max_visits = int(state.get("max_visits") or 5)
+            if max_visits > 0 and visits[name] > max_visits:
+                raise AndroidAutomationError(f"state {name!r} repeated {visits[name]} times; history={history}")
+            steps = state.get("steps") or state.get("actions") or []
+            if not isinstance(steps, list) or not steps:
+                raise AndroidAutomationError(f"state {name!r} has no steps/actions")
+            self.run(steps, out_dir=out_dir)
+            delay_s = float(state.get("settle_s") or settle_s)
+            if delay_s > 0:
+                time.sleep(delay_s)
+        raise AndroidAutomationError(f"state flow exceeded {max_iterations} iterations; history={history}")
+
 
 def cmd_inspect(args: argparse.Namespace) -> int:
     cfg = _load_json(Path(args.config))
     auto_cfg = _automation_cfg(cfg)
     _adb_connect(auto_cfg)
+    _configure_screen_awake(auto_cfg)
     _set_android_proxy(auto_cfg)
     driver = _driver(auto_cfg)
     try:
@@ -549,6 +785,7 @@ def cmd_otp(args: argparse.Namespace) -> int:
     interval_s = float(otp_cfg.get("poll_interval_s", 2))
     notification_source = str(otp_cfg.get("notification_source") or otp_cfg.get("read_mode") or "auto").strip().lower()
     _adb_connect(auto_cfg)
+    _configure_screen_awake(auto_cfg)
     driver = None
     if notification_source in ("", "auto", "appium"):
         try:
@@ -591,21 +828,34 @@ def cmd_unlink(args: argparse.Namespace) -> int:
     auto_cfg = _automation_cfg(cfg)
     unlink_cfg = _section(auto_cfg, "gopay_unlink")
     steps = unlink_cfg.get("steps") or []
-    if not isinstance(steps, list) or not steps:
-        raise AndroidAutomationError("android_automation.gopay_unlink.steps is empty; run inspect first")
+    states = unlink_cfg.get("states") or unlink_cfg.get("pages") or []
+    if (not isinstance(states, list) or not states) and (not isinstance(steps, list) or not steps):
+        raise AndroidAutomationError("android_automation.gopay_unlink.states or steps is empty; run inspect first")
     _adb_connect(auto_cfg)
+    _configure_screen_awake(auto_cfg)
     _set_android_proxy(auto_cfg)
+    _keep_screen_awake(auto_cfg)
+    _activate_app_adb(auto_cfg, unlink_cfg, label="gopay")
     _, _UiAutomator2Options, AppiumBy = _import_appium()
-    driver = _driver(auto_cfg)
+    driver = _driver(auto_cfg, app_cfg=unlink_cfg)
     try:
-        if unlink_cfg.get("package"):
+        if _app_package(unlink_cfg):
             try:
-                driver.activate_app(str(unlink_cfg["package"]))
+                _activate_app_driver(driver, unlink_cfg, label="gopay")
             except Exception:
                 pass
-        runner = StepRunner(driver, AppiumBy, default_package=str(unlink_cfg.get("package") or ""))
-        runner.run(steps, out_dir=Path(args.out))
-        print(json.dumps({"ok": True, "steps": len(steps)}, ensure_ascii=False))
+        runner = StepRunner(driver, AppiumBy, default_package=_app_package(unlink_cfg))
+        if isinstance(states, list) and states:
+            result = runner.run_states(
+                states,
+                out_dir=Path(args.out),
+                max_iterations=int(unlink_cfg.get("state_max_iterations") or 30),
+                settle_s=float(unlink_cfg.get("state_settle_s") or 0.6),
+            )
+            print(json.dumps({"ok": True, "states": result}, ensure_ascii=False))
+        else:
+            runner.run(steps, out_dir=Path(args.out))
+            print(json.dumps({"ok": True, "steps": len(steps)}, ensure_ascii=False))
         return 0
     finally:
         try:

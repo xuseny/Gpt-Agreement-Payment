@@ -944,6 +944,23 @@ def _clean_otp_candidate(value: Any) -> str:
     return ""
 
 
+_TEXT_OTP_CONTEXT_RE = r"otp|one[-\s]*time|password|verification|verify|code|kode|verifikasi|gopay"
+
+
+def _text_otp_digits(value: Any) -> str:
+    return re.sub(r"\D", "", str(value or ""))
+
+
+def _text_code_regex_accepts(digits: str, code_regex: str = DEFAULT_OTP_REGEX) -> bool:
+    if not digits:
+        return False
+    pattern = code_regex or DEFAULT_OTP_REGEX
+    try:
+        return bool(re.fullmatch(pattern, digits))
+    except re.error:
+        return bool(re.fullmatch(DEFAULT_OTP_REGEX, digits))
+
+
 def _extract_otp_from_text(text: str, code_regex: str = DEFAULT_OTP_REGEX) -> str:
     """Extract the most likely WhatsApp OTP from a text blob.
 
@@ -953,9 +970,10 @@ def _extract_otp_from_text(text: str, code_regex: str = DEFAULT_OTP_REGEX) -> st
     if not text:
         return ""
     patterns = [
-        r"(?:otp|one[-\s]*time|verification|verify|code|kode|verifikasi|gopay|whatsapp|验证码|驗證碼)[^\d]{0,80}(\d{4,8})(?!\d)",
-        r"(?<!\d)(\d{4,8})(?!\d)[^\n\r]{0,80}(?:otp|one[-\s]*time|verification|verify|code|kode|verifikasi|gopay|验证码|驗證碼)",
         code_regex or DEFAULT_OTP_REGEX,
+        r"(?<!\d)((?:\d[\s.-]?){6})(?!\d)",
+        rf"(?:{_TEXT_OTP_CONTEXT_RE})[^\d]{{0,80}}((?:\d[\s.-]?){{6}})(?!\d)",
+        rf"(?<!\d)((?:\d[\s.-]?){{6}})[^\n\r]{{0,80}}(?:{_TEXT_OTP_CONTEXT_RE})",
     ]
     for pattern in patterns:
         try:
@@ -965,9 +983,9 @@ def _extract_otp_from_text(text: str, code_regex: str = DEFAULT_OTP_REGEX) -> st
         for match in reversed(matches):
             groups = match.groups() or (match.group(0),)
             for group in reversed(groups):
-                code = _clean_otp_candidate(group)
-                if code:
-                    return code
+                digits = _text_otp_digits(group)
+                if _text_code_regex_accepts(digits, code_regex=code_regex):
+                    return digits
     return ""
 
 
