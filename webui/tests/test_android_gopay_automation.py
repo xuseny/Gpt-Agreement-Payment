@@ -100,3 +100,55 @@ def test_dumpsys_notification_payload_keeps_matching_package():
         {"package_filters": ["com.whatsapp"], "keywords": ["gopay", "kode"]},
     ) == "778899"
     assert item["postTime"] == 1777951538509
+
+
+def test_step_runner_optional_tap_allows_missing_element(tmp_path):
+    class By:
+        ID = "id"
+        XPATH = "xpath"
+        ACCESSIBILITY_ID = "accessibility_id"
+        ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+    class Driver:
+        page_source = "<hierarchy><node text=\"Linked apps\" /></hierarchy>"
+
+        def find_element(self, *_args):
+            raise RuntimeError("missing")
+
+    runner = android_gopay.StepRunner(Driver(), By)
+
+    runner.run(
+        [{"action": "tap_optional", "text": "Profile", "timeout_s": 0.01}],
+        out_dir=tmp_path,
+    )
+
+
+def test_step_runner_back_if_text_any(tmp_path):
+    class By:
+        ID = "id"
+        XPATH = "xpath"
+        ACCESSIBILITY_ID = "accessibility_id"
+        ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+    class Driver:
+        page_source = "<hierarchy><node text=\"No apps linked to your GoPay\" /></hierarchy>"
+
+        def __init__(self):
+            self.back_calls = 0
+
+        def back(self):
+            self.back_calls += 1
+
+    driver = Driver()
+    runner = android_gopay.StepRunner(driver, By)
+
+    runner.run(
+        [{
+            "action": "back_if_text_any",
+            "values": ["No apps linked to your GoPay"],
+            "timeout_s": 0.01,
+        }],
+        out_dir=tmp_path,
+    )
+
+    assert driver.back_calls == 1

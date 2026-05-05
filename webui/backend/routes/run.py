@@ -1,13 +1,21 @@
 import asyncio
 import json
-from fastapi import APIRouter, HTTPException
+import secrets
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 from ..auth import CurrentUser
-from .. import runner
+from .. import runner, wa_relay
 from ..config_health import build_config_health, health_error_message
 
 router = APIRouter(prefix="/api/run", tags=["run"])
+
+
+def _check_relay_token(token: str = "", x_wa_relay_token: str = "") -> None:
+    got = token or x_wa_relay_token or ""
+    expected = wa_relay.relay_token()
+    if not got or not secrets.compare_digest(got, expected):
+        raise HTTPException(status_code=403, detail="invalid relay token")
 
 
 class StartRequest(BaseModel):
@@ -68,6 +76,19 @@ def submit_otp(req: OTPRequest, user: str = CurrentUser):
 @router.get("/logs")
 def get_logs(tail: int = 500, user: str = CurrentUser):
     return {"lines": runner.get_tail(tail)}
+
+
+@router.get("/sidecar/logs")
+def get_sidecar_logs(
+    since: int = 0,
+    limit: int = 500,
+    token: str = "",
+    x_wa_relay_token: str = Header(default=""),
+):
+    _check_relay_token(token=token, x_wa_relay_token=x_wa_relay_token)
+    limit = max(1, min(int(limit), 1000))
+    lines = runner.get_lines_since(int(since), limit=limit) if since > 0 else runner.get_tail(limit)
+    return {"ok": True, "lines": lines, "status": runner.status()}
 
 
 @router.get("/stream")

@@ -15,6 +15,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
@@ -29,7 +30,9 @@ import android_gopay_automation as android  # noqa: E402
 
 DEFAULT_CONFIG = HERE / "config.android-gopay.example.json"
 DEFAULT_PUSH_PATH = "/api/whatsapp/sidecar/state"
+DEFAULT_RUN_LOGS_PATH = "/api/run/sidecar/logs"
 DEFAULT_STATE_FILE = Path("output/android-phone-worker-state.json")
+DEFAULT_GOPAY_UNLINK_TRIGGER_STRINGS = ("GoPay \u6388\u6743 + \u6263\u6b3e\u5b8c\u6210",)
 
 
 class PhoneWorkerError(RuntimeError):
@@ -66,6 +69,35 @@ def _push_url(worker_cfg: dict) -> str:
     if not str(base).strip():
         raise PhoneWorkerError("phone_worker.server_base_url or PHONE_WORKER_SERVER_BASE_URL is required")
     path = str(worker_cfg.get("push_path") or DEFAULT_PUSH_PATH)
+    return _join_url(str(base), path)
+
+
+def _gopay_unlink_worker_cfg(worker_cfg: dict) -> dict:
+    value = worker_cfg.get("gopay_unlink") or worker_cfg.get("auto_gopay_unlink") or {}
+    if value is True:
+        return {"enabled": True}
+    if not isinstance(value, dict):
+        raise PhoneWorkerError("phone_worker.gopay_unlink must be an object")
+    return value
+
+
+def _run_logs_url(worker_cfg: dict, unlink_cfg: dict) -> str:
+    explicit = str(
+        unlink_cfg.get("run_logs_url")
+        or worker_cfg.get("run_logs_url")
+        or ""
+    ).strip()
+    if explicit:
+        return explicit
+    base = (
+        os.environ.get("PHONE_WORKER_SERVER_BASE_URL")
+        or worker_cfg.get("server_base_url")
+        or worker_cfg.get("webui_base_url")
+        or ""
+    )
+    if not str(base).strip():
+        raise PhoneWorkerError("phone_worker.server_base_url or PHONE_WORKER_SERVER_BASE_URL is required")
+    path = str(unlink_cfg.get("run_logs_path") or worker_cfg.get("run_logs_path") or DEFAULT_RUN_LOGS_PATH)
     return _join_url(str(base), path)
 
 
@@ -179,6 +211,62 @@ def _post_json(url: str, token: str, payload: dict, *, timeout: float) -> dict:
         raise PhoneWorkerError(f"push failed: {exc}") from exc
 
 
+def _get_json(url: str, token: str, *, timeout: float) -> dict:
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"X-WA-Relay-Token": token},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            if not body:
+                return {"ok": 200 <= resp.status < 300}
+            try:
+                data = json.loads(body)
+            except ValueError:
+                return {"ok": 200 <= resp.status < 300, "body": body}
+            return data if isinstance(data, dict) else {"ok": 200 <= resp.status < 300, "data": data}
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise PhoneWorkerError(f"run log poll failed: HTTP {exc.code} {detail[:200]}") from exc
+    except urllib.error.URLError as exc:
+        raise PhoneWorkerError(f"run log poll failed: {exc}") from exc
+
+
+def _fetch_run_log_payload(url: str, token: str, *, since_seq: int, limit: int, timeout: float) -> dict:
+    query = urllib.parse.urlencode({
+        "since": max(0, int(since_seq)),
+        "limit": max(1, int(limit)),
+    })
+    sep = "&" if "?" in url else "?"
+    return _get_json(f"{url}{sep}{query}", token, timeout=timeout)
+
+
+def _entry_seq(entry: Any) -> int:
+    if not isinstance(entry, dict):
+        return 0
+    try:
+        return int(entry.get("seq") or 0)
+    except Exception:
+        return 0
+
+
+def _entry_line(entry: Any) -> str:
+    if isinstance(entry, dict):
+        return str(entry.get("line") or "")
+    return str(entry or "")
+
+
+def _log_entry_matches_unlink_trigger(entry: Any, trigger_strings: list[str]) -> bool:
+    line = _entry_line(entry)
+    return any(trigger and trigger in line for trigger in trigger_strings)
+
+
+def _run_configured_unlink(config_path: str, out_dir: str) -> int:
+    return int(android.cmd_unlink(argparse.Namespace(config=config_path, out=out_dir)))
+
+
 def _build_push_payload(event: dict, auto_cfg: dict) -> dict:
     item = {
         "otp": event["otp"],
@@ -275,6 +363,27 @@ def run_worker(args: argparse.Namespace) -> int:
     state = _load_state(state_path)
     url = _push_url(worker_cfg)
     token = _relay_token(worker_cfg)
+    unlink_worker_cfg = _gopay_unlink_worker_cfg(worker_cfg)
+    auto_unlink_enabled = bool(unlink_worker_cfg.get("enabled", False))
+    run_logs_url = _run_logs_url(worker_cfg, unlink_worker_cfg) if auto_unlink_enabled else ""
+    unlink_poll_interval_s = float(unlink_worker_cfg.get("poll_interval_s") or interval_s)
+    unlink_log_limit = int(unlink_worker_cfg.get("log_limit") or 500)
+    unlink_out_dir = str(unlink_worker_cfg.get("out_dir") or "output/android-gopay-unlink")
+    unlink_delay_s = float(unlink_worker_cfg.get("delay_after_trigger_s") or 0)
+    ignore_existing_run_logs = bool(unlink_worker_cfg.get("ignore_existing_run_logs_on_start", True))
+    trigger_strings = [
+        str(item)
+        for item in (
+            unlink_worker_cfg.get("trigger_strings")
+            or unlink_worker_cfg.get("triggers")
+            or DEFAULT_GOPAY_UNLINK_TRIGGER_STRINGS
+        )
+        if str(item).strip()
+    ]
+    try:
+        last_run_log_seq = int(state.get("last_run_log_seq") or 0)
+    except Exception:
+        last_run_log_seq = 0
 
     android._adb_connect(auto_cfg)
     if worker_cfg.get("set_proxy_on_start", True):
@@ -283,8 +392,88 @@ def run_worker(args: argparse.Namespace) -> int:
     driver = None
     appium_disabled_until = 0.0
     first_scan = True
+    first_run_log_scan = True
+    next_unlink_log_poll_at = 0.0
+    last_unlink_log_error_at = 0.0
     try:
         while True:
+            if auto_unlink_enabled and time.time() >= next_unlink_log_poll_at:
+                next_unlink_log_poll_at = time.time() + max(0.5, unlink_poll_interval_s)
+                try:
+                    log_payload = _fetch_run_log_payload(
+                        run_logs_url,
+                        token,
+                        since_seq=last_run_log_seq,
+                        limit=unlink_log_limit,
+                        timeout=post_timeout_s,
+                    )
+                    status = log_payload.get("status") if isinstance(log_payload.get("status"), dict) else {}
+                    try:
+                        log_count = int(status.get("log_count") or 0)
+                    except Exception:
+                        log_count = 0
+                    if last_run_log_seq and log_count and log_count < last_run_log_seq:
+                        last_run_log_seq = 0
+                        first_run_log_scan = True
+                        log_payload = _fetch_run_log_payload(
+                            run_logs_url,
+                            token,
+                            since_seq=0,
+                            limit=unlink_log_limit,
+                            timeout=post_timeout_s,
+                        )
+                    lines = log_payload.get("lines") if isinstance(log_payload.get("lines"), list) else []
+                    if lines:
+                        max_seq = max([last_run_log_seq] + [_entry_seq(entry) for entry in lines])
+                        if first_run_log_scan and ignore_existing_run_logs:
+                            last_run_log_seq = max_seq
+                            state["last_run_log_seq"] = last_run_log_seq
+                            _save_state(state_path, state)
+                        else:
+                            trigger_entry = None
+                            for entry in lines:
+                                if _log_entry_matches_unlink_trigger(entry, trigger_strings):
+                                    trigger_entry = entry
+                                    break
+                            last_run_log_seq = max_seq
+                            state["last_run_log_seq"] = last_run_log_seq
+                            if trigger_entry is not None:
+                                trigger_seq = _entry_seq(trigger_entry)
+                                state["last_unlink_trigger_seq"] = trigger_seq
+                                state["last_unlink_trigger_line"] = _entry_line(trigger_entry)[:300]
+                                state["last_unlink_trigger_at"] = time.time()
+                                _save_state(state_path, state)
+                                _log(f"gopay unlink trigger seq={trigger_seq}: {_entry_line(trigger_entry)[:120]}")
+                                if unlink_delay_s > 0:
+                                    time.sleep(unlink_delay_s)
+                                try:
+                                    if driver is not None:
+                                        driver.quit()
+                                except Exception:
+                                    pass
+                                driver = None
+                                try:
+                                    rc = _run_configured_unlink(str(args.config), unlink_out_dir)
+                                except Exception as exc:
+                                    rc = 2
+                                    _log(f"gopay unlink flow failed: {exc}")
+                                else:
+                                    if rc == 0:
+                                        _log("gopay unlink flow completed")
+                                    else:
+                                        _log(f"gopay unlink flow failed rc={rc}")
+                                state["last_unlink_at"] = time.time()
+                                state["last_unlink_rc"] = rc
+                            _save_state(state_path, state)
+                        first_run_log_scan = False
+                    elif first_run_log_scan:
+                        first_run_log_scan = False
+                except PhoneWorkerError as exc:
+                    now = time.time()
+                    if now - last_unlink_log_error_at >= skip_log_interval_s:
+                        _log(str(exc))
+                        last_unlink_log_error_at = now
+
             payload = None
             engine = "android_adb_dumpsys"
             try:

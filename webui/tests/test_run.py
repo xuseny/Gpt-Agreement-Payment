@@ -61,6 +61,53 @@ def test_run_requires_auth(client):
     assert r.status_code == 401
 
 
+def test_sidecar_logs_requires_relay_token(client):
+    r = client.get("/api/run/sidecar/logs")
+    assert r.status_code == 403
+
+
+def test_sidecar_logs_returns_lines_since(client):
+    import time
+    import webui.backend.runner as runner_mod
+    import webui.backend.wa_relay as wa_relay
+
+    token = wa_relay.relay_token()
+    runner_mod._log_lines = [
+        {"seq": 1, "ts": time.time(), "line": "before"},
+        {"seq": 2, "ts": time.time(), "line": "GoPay 授权 + 扣款完成，继续 poll 结果 ..."},
+    ]
+    runner_mod._seq_counter = 2
+
+    r = client.get(
+        "/api/run/sidecar/logs?since=1",
+        headers={"X-WA-Relay-Token": token},
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert [line["seq"] for line in body["lines"]] == [2]
+
+
+def test_webui_prefixed_sidecar_logs_returns_lines(client):
+    import time
+    import webui.backend.runner as runner_mod
+    import webui.backend.wa_relay as wa_relay
+
+    token = wa_relay.relay_token()
+    runner_mod._log_lines = [
+        {"seq": 1, "ts": time.time(), "line": "GoPay 授权 + 扣款完成，继续 poll 结果 ..."},
+    ]
+    runner_mod._seq_counter = 1
+
+    r = client.get(
+        "/webui/api/run/sidecar/logs?since=0",
+        headers={"X-WA-Relay-Token": token},
+    )
+
+    assert r.status_code == 200
+    assert r.json()["lines"][0]["seq"] == 1
+
+
 def test_run_start_then_409(client, monkeypatch):
     """Mock 一个不会立即退出的 subprocess，确保第二次 start 返 409。
 

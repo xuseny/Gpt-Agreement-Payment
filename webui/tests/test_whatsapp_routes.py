@@ -8,6 +8,20 @@ def test_whatsapp_status_requires_auth(client):
     assert r.status_code == 401
 
 
+def test_webui_prefixed_whatsapp_sidecar_state(client):
+    from webui.backend import wa_relay
+
+    token = wa_relay.relay_token()
+    r = client.post(
+        "/webui/api/whatsapp/sidecar/state",
+        headers={"X-WA-Relay-Token": token},
+        json={"status": "connected", "latest": {"otp": "123456", "ts": 1}},
+    )
+
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+
 def test_whatsapp_status_authed(client, monkeypatch):
     _login(client)
 

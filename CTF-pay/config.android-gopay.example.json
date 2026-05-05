@@ -32,7 +32,18 @@
     "ignore_existing_on_start": true,
     "state_file": "output/android-phone-worker-state.json",
     "set_proxy_on_start": true,
-    "clear_proxy_on_exit": false
+    "clear_proxy_on_exit": false,
+    "gopay_unlink": {
+      "enabled": true,
+      "run_logs_path": "/api/run/sidecar/logs",
+      "trigger_strings": [
+        "GoPay \u6388\u6743 + \u6263\u6b3e\u5b8c\u6210"
+      ],
+      "ignore_existing_run_logs_on_start": true,
+      "poll_interval_s": 2,
+      "out_dir": "output/android-gopay-unlink",
+      "delay_after_trigger_s": 0
+    }
   },
   "android_automation": {
     "adb_path": "adb",
@@ -84,6 +95,60 @@
         {
           "action": "dump",
           "name": "start"
+        },
+        {
+          "action": "tap_optional",
+          "text_contains": "Profile",
+          "timeout_s": 4
+        },
+        {
+          "action": "tap_optional",
+          "text_contains": "Account & app settings",
+          "timeout_s": 6
+        },
+        {
+          "action": "back_if_text_any",
+          "values": [
+            "No apps linked to your GoPay",
+            "Successfully unlinked"
+          ],
+          "timeout_s": 1
+        },
+        {
+          "action": "tap_optional",
+          "text_contains": "Account & app settings",
+          "timeout_s": 3
+        },
+        {
+          "action": "tap",
+          "text_contains": "Linked apps",
+          "timeout_s": 20
+        },
+        {
+          "action": "tap",
+          "text": "Unlink",
+          "timeout_s": 20
+        },
+        {
+          "action": "sleep",
+          "seconds": 1
+        },
+        {
+          "action": "tap",
+          "text": "Unlink",
+          "timeout_s": 20
+        },
+        {
+          "action": "assert_text_any",
+          "values": [
+            "Successfully unlinked",
+            "No apps linked to your GoPay"
+          ],
+          "timeout_s": 20
+        },
+        {
+          "action": "dump",
+          "name": "after_unlink"
         }
       ]
     }

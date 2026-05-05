@@ -109,3 +109,27 @@ def test_push_url_joins_base_and_path(monkeypatch):
     })
 
     assert url == "https://example.com/webui/api/whatsapp/sidecar/state"
+
+
+def test_run_logs_url_joins_default_path(monkeypatch):
+    monkeypatch.delenv("PHONE_WORKER_SERVER_BASE_URL", raising=False)
+
+    url = phone_worker._run_logs_url(
+        {"server_base_url": "https://example.com/webui/"},
+        {},
+    )
+
+    assert url == "https://example.com/webui/api/run/sidecar/logs"
+
+
+def test_log_entry_matches_gopay_unlink_trigger():
+    entry = {"seq": 7, "line": "      GoPay 授权 + 扣款完成，继续 poll 结果 ..."}
+
+    assert phone_worker._log_entry_matches_unlink_trigger(
+        entry,
+        ["GoPay 授权 + 扣款完成"],
+    )
+    assert not phone_worker._log_entry_matches_unlink_trigger(
+        entry,
+        ["PayPal 授权完成"],
+    )
