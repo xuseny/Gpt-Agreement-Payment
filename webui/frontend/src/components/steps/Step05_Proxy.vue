@@ -54,7 +54,14 @@
     </div>
 
     <div v-if="form.mode === 'manual'" class="form-stack" style="margin-top:16px">
-      <TermField v-model="form.url" label="代理 URL · url" placeholder="socks5://user:pw@host:port" />
+      <label class="tf-multi">
+        <span class="tf-tag">代理 URL · url</span>
+        <textarea
+          v-model="form.url"
+          placeholder="socks5://user:pw@host:port&#10;http://user:pw@host2:port"
+          rows="5"
+        ></textarea>
+      </label>
       <TermField v-model="form.expected_country" label="期望国家 · expected_country" placeholder="US" />
       <div class="step-actions">
         <TermBtn :loading="loading" @click="testProxy">测试出口 IP</TermBtn>

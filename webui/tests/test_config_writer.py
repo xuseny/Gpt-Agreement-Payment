@@ -107,6 +107,33 @@ def test_export_writes_gopay_auto_otp(client, tmp_path, monkeypatch):
     assert pay["gopay"]["otp"]["interval"] == 1
 
 
+def test_export_manual_proxy_multiline_enables_random_pool(client, tmp_path, monkeypatch):
+    _login(client)
+    _seed(tmp_path, monkeypatch)
+
+    answers = {
+        "proxy": {
+            "mode": "manual",
+            "url": "socks5://user:pw@proxy-a.example:1080\nhttp://user:pw@proxy-b.example:8080\n",
+        },
+    }
+    r = client.post("/api/config/export", json={"answers": answers})
+    assert r.status_code == 200
+
+    pay = json.loads((tmp_path / "CTF-pay" / "config.paypal.json").read_text())
+    reg = json.loads((tmp_path / "CTF-reg" / "config.paypal-proxy.json").read_text())
+    assert pay["proxy"] == "socks5://user:pw@proxy-a.example:1080"
+    assert pay["proxies"] == {
+        "enabled": True,
+        "rotation": "random",
+        "list": [
+            "socks5://user:pw@proxy-a.example:1080",
+            "http://user:pw@proxy-b.example:8080",
+        ],
+    }
+    assert reg["proxy"] == "socks5://user:pw@proxy-a.example:1080"
+
+
 def test_export_writes_hosted_checkout_link_mode(client, tmp_path, monkeypatch):
     _login(client)
     _seed(tmp_path, monkeypatch)

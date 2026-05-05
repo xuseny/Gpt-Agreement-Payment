@@ -2468,7 +2468,7 @@ def _rotate_webshare_ip(card_cfg: dict, team_client=None, prev_ip: str = "") -> 
 
 class ProxyPool:
     """代理轮换池（stub）。未来扩展：健康检查、失败标记、LRU 轮换。
-    当前行为：有 list 则返回第一个（保持稳定），无 list 返回空字符串（走配置默认代理）。"""
+    当前行为：rotation=random 时随机挑选；否则返回第一个保持稳定。"""
 
     def __init__(self, proxies=None, rotation="static", state_file=None):
         self.proxies = [p for p in (proxies or []) if p and str(p).strip()]
@@ -2498,8 +2498,9 @@ def _rewrite_cardw_with_domain(src_path, domain, proxy_url=""):
     """读 CTF-reg config，把 catch_all_domain 覆盖为 domain，可选覆盖 proxy，写到临时文件返回路径"""
     with open(src_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    mail = data.setdefault("mail", {})
-    mail["catch_all_domain"] = domain
+    if domain:
+        mail = data.setdefault("mail", {})
+        mail["catch_all_domain"] = domain
     if proxy_url:
         data["proxy"] = proxy_url
     tmp = tempfile.NamedTemporaryFile(

@@ -16,7 +16,7 @@ def test_proxy_ok_country_match(client):
     )
     r = client.post("/api/preflight/proxy", json={
         "mode": "manual",
-        "url": "socks5://user:pw@127.0.0.1:1080",
+        "url": "http://user:pw@127.0.0.1:1080",
         "expected_country": "US",
     })
     assert r.json()["status"] == "ok"
@@ -31,10 +31,32 @@ def test_proxy_country_mismatch(client):
     )
     r = client.post("/api/preflight/proxy", json={
         "mode": "manual",
-        "url": "socks5://user:pw@127.0.0.1:1080",
+        "url": "http://user:pw@127.0.0.1:1080",
         "expected_country": "US",
     })
     assert r.json()["status"] == "warn"
+
+
+@respx.mock
+def test_proxy_multiline_picks_one_candidate(client, monkeypatch):
+    _login(client)
+    monkeypatch.setattr("webui.backend.preflight.proxy.random.choice", lambda items: items[1])
+    respx.get("https://api.ipify.org").mock(return_value=Response(200, text="5.6.7.8"))
+    respx.get("http://ip-api.com/json/5.6.7.8").mock(
+        return_value=Response(200, json={"status": "success", "countryCode": "US", "country": "United States"})
+    )
+    r = client.post("/api/preflight/proxy", json={
+        "mode": "manual",
+        "url": "http://proxy-a.example:8080\nhttp://proxy-b.example:8080",
+        "expected_country": "US",
+    })
+
+    body = r.json()
+    assert body["status"] == "ok"
+    assert any(
+        check["name"] == "selected_proxy" and check["message"] == "http://proxy-b.example:8080"
+        for check in body["checks"]
+    )
 
 
 def test_proxy_mode_none(client):

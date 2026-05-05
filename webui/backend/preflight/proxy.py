@@ -1,4 +1,6 @@
 import os
+import random
+import shutil
 import subprocess
 import socket as _sock
 import time
@@ -16,8 +18,16 @@ GOST_RELAY_PORT = 18899
 
 class ProxyInput(BaseModel):
     mode: str  # "webshare" | "manual" | "none"
-    url: str | None = None
+    url: str | list[str] | None = None
     expected_country: str | None = None
+
+
+def _proxy_url_candidates(value: str | list[str] | None) -> list[str]:
+    if isinstance(value, list):
+        values = value
+    else:
+        values = str(value or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return [str(item).strip() for item in values if str(item).strip()]
 
 
 def _is_socks5_with_auth(url: str) -> bool:
@@ -35,7 +45,7 @@ def _port_listening(port: int) -> bool:
 
 def _spawn_gost_relay(upstream_url: str, listen_port: int) -> tuple[bool, str]:
     """Spawn `gost -L=socks5://:N -F=<upstream>` as a daemon. Returns (ok, msg)."""
-    if not subprocess.run(["which", "gost"], capture_output=True).stdout.strip():
+    if not shutil.which("gost"):
         return False, "gost 未安装：apt 不带，到 https://github.com/go-gost/gost/releases 下二进制扔到 /usr/local/bin/"
     log_path = f"/tmp/gost-{listen_port}.log"
     cmd = ["gost", f"-L=socks5://:{listen_port}", f"-F={upstream_url}"]
@@ -67,12 +77,15 @@ def check(body: dict) -> PreflightResult:
         return aggregate([CheckResult(name="proxy", status="ok",
                                       message="no proxy configured")])
 
-    proxy_url = cfg.url
-    if not proxy_url:
+    proxy_urls = _proxy_url_candidates(cfg.url)
+    if not proxy_urls:
         return aggregate([CheckResult(name="proxy", status="fail",
                                       message="proxy url required for mode=" + cfg.mode)])
+    proxy_url = random.choice(proxy_urls)
 
     checks: list[CheckResult] = []
+    if len(proxy_urls) > 1:
+        checks.append(CheckResult(name="selected_proxy", status="ok", message=proxy_url))
 
     # 直连上游：先确认 proxy 本身能用
     try:

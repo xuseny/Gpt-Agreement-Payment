@@ -26,6 +26,15 @@ def _payment_method(answers: dict) -> str:
     return (answers.get("payment") or {}).get("method", "both")
 
 
+def _manual_proxy_urls(proxy: dict) -> list[str]:
+    raw = (proxy or {}).get("url")
+    if isinstance(raw, list):
+        values = raw
+    else:
+        values = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
 def _project_pay(answers: dict) -> dict:
     """Map flat wizard answers onto CTF-pay config schema."""
     out: dict = {}
@@ -106,8 +115,16 @@ def _project_pay(answers: dict) -> dict:
             out["proxy"] = f"socks5://127.0.0.1:{gost_port}"
         elif mode == "none":
             out["proxy"] = ""
-        elif proxy.get("url"):
-            out["proxy"] = proxy["url"]
+        else:
+            proxy_urls = _manual_proxy_urls(proxy)
+            if proxy_urls:
+                out["proxy"] = proxy_urls[0]
+                if len(proxy_urls) > 1:
+                    out["proxies"] = {
+                        "enabled": True,
+                        "rotation": "random",
+                        "list": proxy_urls,
+                    }
     return out
 
 
@@ -140,8 +157,10 @@ def _project_reg(answers: dict) -> dict:
             out["proxy"] = f"socks5://127.0.0.1:{gost_port}"
         elif mode == "none":
             out["proxy"] = ""
-        elif proxy.get("url"):
-            out["proxy"] = proxy["url"]
+        else:
+            proxy_urls = _manual_proxy_urls(proxy)
+            if proxy_urls:
+                out["proxy"] = proxy_urls[0]
     return out
 
 
