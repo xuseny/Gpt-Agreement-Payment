@@ -41,12 +41,36 @@ export default {
     // OpenAI 邮件 HTML 里大量出现 #353740 / #10A37F 等品牌色 hex，fallback
     // \b\d{6}\b 会把全数字 hex（如 #353740）误抽成 OTP。
     // 用 negative lookbehind 排除前面是 # 的，并显式排除常见 CSS hex 上下文。
+    const knownColorTokens = new Set([
+      // OpenAI/ChatGPT HTML brand colors that are all digits and therefore
+      // look like OTPs to a plain /\b\d{6}\b/ fallback.
+      '353740',
+      '202123',
+    ]);
+
     const isHexColor = (haystack, idx) => {
       if (idx > 0 && haystack[idx - 1] === '#') return true;
       // "color:353740" / "background-color: #353740" / "bgcolor=\"353740\""
       const before = haystack.slice(Math.max(0, idx - 30), idx);
       return /(?:color|background|bgcolor|fill|stroke)\s*[:=]\s*["']?#?\s*$/i.test(before);
     };
+
+    const isKnownColorToken = (haystack, idx, value) => {
+      if (!knownColorTokens.has(value)) return false;
+      const before = haystack.slice(Math.max(0, idx - 120), idx);
+      const after = haystack.slice(idx + value.length, idx + value.length + 40);
+      if (/(?:#|=23)\s*$/i.test(before)) return true;
+      if (/(?:color|background|bgcolor|fill|stroke|border|style)[\s\S]{0,80}$/i.test(before)) {
+        return /^[\s"'%;>,<)]/.test(after);
+      }
+      return /(?:html|body|table|td|span|font|button|a|css|style)[\s\S]{0,80}$/i.test(before);
+    };
+
+    const shouldSkipCandidate = (haystack, idx, value) => (
+      isFromAddr(value) ||
+      isHexColor(haystack, idx) ||
+      isKnownColorToken(haystack, idx, value)
+    );
 
     // OTP extraction — semantic context first to avoid grabbing tracking ids,
     // and skip any candidate that's a substring of the address digits.
@@ -62,7 +86,7 @@ export default {
     for (const re of candidates) {
       let m;
       while ((m = re.exec(haystack)) !== null) {
-        if (!isFromAddr(m[1]) && !isHexColor(haystack, m.index + m[0].lastIndexOf(m[1]))) {
+        if (!shouldSkipCandidate(haystack, m.index + m[0].lastIndexOf(m[1]), m[1])) {
           otp = m[1]; break;
         }
       }
@@ -77,8 +101,7 @@ export default {
       let m;
       while ((m = re.exec(body)) !== null) {
         const cand = m[1];
-        if (isFromAddr(cand)) continue;
-        if (isHexColor(body, m.index)) continue;
+        if (shouldSkipCandidate(body, m.index, cand)) continue;
         otp = cand; break;
       }
     }

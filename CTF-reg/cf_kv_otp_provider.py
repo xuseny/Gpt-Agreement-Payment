@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -37,6 +38,20 @@ if str(_REPO_ROOT) not in sys.path:
 logger = logging.getLogger(__name__)
 
 CF_BASE = "https://api.cloudflare.com/client/v4"
+KNOWN_NON_OTP_VALUES = {"353740", "202123"}
+
+
+def _subject_confirms_otp(subject: str, otp: str) -> bool:
+    if not subject or not otp:
+        return False
+    otp_re = re.escape(otp)
+    return bool(
+        re.search(
+            rf"(?:code(?:\s*is)?|verification|one[-\s]*time|verify|验证码|chatgpt|openai)[^\d]{{0,40}}{otp_re}\b",
+            subject,
+            re.IGNORECASE,
+        )
+    )
 
 
 class CloudflareKVOtpProvider:
@@ -56,12 +71,23 @@ class CloudflareKVOtpProvider:
         kv_namespace_id: str,
         poll_interval_s: float = 1.0,
         delete_after_read: bool = True,
+        issued_after_grace_s: Optional[float] = None,
     ):
         self.token = api_token
         self.account_id = account_id
         self.kv_id = kv_namespace_id
         self.poll_interval_s = max(0.2, poll_interval_s)
         self.delete_after_read = delete_after_read
+        if issued_after_grace_s is None:
+            raw_grace = os.getenv("OTP_ISSUED_AFTER_GRACE_S", "").strip()
+            try:
+                issued_after_grace_s = float(raw_grace) if raw_grace else 45.0
+            except Exception:
+                logger.warning(
+                    f"Invalid OTP_ISSUED_AFTER_GRACE_S={raw_grace!r}; using 45s"
+                )
+                issued_after_grace_s = 45.0
+        self.issued_after_grace_s = max(0.0, float(issued_after_grace_s))
         self._opener = urllib.request.build_opener(
             urllib.request.ProxyHandler({})  # 跟 pipeline.py 同款，避开 http_proxy
         )
@@ -207,14 +233,14 @@ class CloudflareKVOtpProvider:
         """Poll KV until an OTP keyed by `email_addr` shows up.
 
         - issued_after (epoch seconds): only accept entries written at or
-          after this timestamp (-3s grace for clock skew). Defaults to now,
-          which means "ignore anything written before this call started".
+          after this timestamp minus issued_after_grace_s. Defaults to now,
+          with a bounded lookback for browser/UI latency and clock skew.
         """
         key = email_addr.strip().lower()
         if issued_after is None:
             issued_after = time.time()
-        # 3s grace —— Worker 写入比 issued_after 早一点也算（CF 时钟轻微偏差）
-        accept_threshold_s = issued_after - 3.0
+        # Browser flows may reach the OTP input after the mail is already in KV.
+        accept_threshold_s = issued_after - self.issued_after_grace_s
 
         deadline = time.time() + timeout
         start = time.time()
@@ -222,7 +248,7 @@ class CloudflareKVOtpProvider:
         last_log_at = 0.0
         logger.info(
             f"[CF-KV] 等 OTP key={key} timeout={timeout}s "
-            f"(issued_after={issued_after:.0f})"
+            f"(issued_after={issued_after:.0f} grace={self.issued_after_grace_s:.0f}s)"
         )
 
         while time.time() < deadline:
@@ -241,11 +267,23 @@ class CloudflareKVOtpProvider:
                     if time.time() - last_log_at > 10:
                         logger.info(
                             f"[CF-KV] key={key} 命中但 ts={ts_s:.0f} < "
-                            f"threshold={accept_threshold_s:.0f}，忽略旧值"
+                            f"threshold={accept_threshold_s:.0f} "
+                            f"grace={self.issued_after_grace_s:.0f}s，忽略旧值"
                         )
                         last_log_at = time.time()
                 else:
                     otp = str(payload["otp"]).strip()
+                    subject = str(payload.get("subject") or "")
+                    if (
+                        otp in KNOWN_NON_OTP_VALUES
+                        and not _subject_confirms_otp(subject, otp)
+                    ):
+                        logger.warning(
+                            f"[CF-KV] key={key} 命中疑似 HTML 色值 OTP={otp}，"
+                            "删除坏值并继续等待"
+                        )
+                        self._kv_delete(key)
+                        continue
                     elapsed = time.time() - start
                     logger.info(
                         f"[CF-KV] 收到 OTP={otp} key={key} "

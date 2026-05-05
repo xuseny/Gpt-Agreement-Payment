@@ -1,0 +1,81 @@
+{
+  "gopay": {
+    "country_code": "62",
+    "phone_number": "81234567890",
+    "pin": "YOUR_6_DIGIT_GOPAY_PIN",
+    "otp": {
+      "source": "command",
+      "command": [
+        "python",
+        "CTF-pay/android_gopay_automation.py",
+        "--config",
+        "CTF-pay/config.android-gopay.example.json",
+        "otp"
+      ],
+      "timeout": 300,
+      "interval": 2,
+      "code_regex": "(?<!\\d)(\\d{6})(?!\\d)"
+    }
+  },
+  "android_automation": {
+    "adb_path": "adb",
+    "adb_serial": "127.0.0.1:16384",
+    "appium_server_url": "http://127.0.0.1:4723",
+    "device_name": "MuMu",
+    "capabilities": {
+      "platformName": "Android",
+      "automationName": "UiAutomator2",
+      "noReset": true,
+      "newCommandTimeout": 300
+    },
+    "proxy": {
+      "enabled": false,
+      "host_port": "127.0.0.1:18898",
+      "clear_on_exit": false
+    },
+    "otp": {
+      "timeout_s": 300,
+      "poll_interval_s": 2,
+      "package_filters": [
+        "com.whatsapp"
+      ],
+      "keywords": [
+        "gopay",
+        "gojek",
+        "whatsapp",
+        "otp",
+        "kode",
+        "verifikasi",
+        "verification",
+        "code"
+      ],
+      "code_regex": "(?<!\\d)(\\d{6})(?!\\d)"
+    },
+    "gopay_unlink": {
+      "package": "com.gojek.app",
+      "activity": "",
+      "steps": [
+        {
+          "action": "dump",
+          "name": "start"
+        }
+      ]
+    }
+  },
+  "fresh_checkout": {
+    "auth": {
+      "cookie_header": "",
+      "session_token": "",
+      "access_token": "",
+      "device_id": "",
+      "mode": "access_token"
+    }
+  },
+  "runtime": {
+    "confirm_mode": "shared_payment_method",
+    "version": "fed52f3bc6",
+    "js_checksum": "FILL_FROM_CURRENT_STRIPE_CHECKOUT",
+    "rv_timestamp": "FILL_FROM_CURRENT_STRIPE_CHECKOUT"
+  },
+  "proxy": ""
+}

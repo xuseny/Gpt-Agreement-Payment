@@ -45,6 +45,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
 
 import requests
 
@@ -61,6 +62,26 @@ def _new_session(impersonate: str = "chrome136") -> Any:
     if _CurlCffiSession is not None:
         return _CurlCffiSession(impersonate=impersonate)
     return requests.Session()
+
+
+def _is_tls_transport_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return (
+        "tls connect error" in text
+        or "sslerror" in text
+        or "openssl_internal" in text
+        or "curl: (35)" in text
+    )
+
+
+def _retry_after_seconds(value: str, default: float, max_sleep: float) -> float:
+    raw = (value or "").strip()
+    if raw:
+        try:
+            return min(max_sleep, max(1.0, float(raw)))
+        except Exception:
+            pass
+    return min(max_sleep, max(1.0, default))
 
 
 # ──────────────────────────── constants ───────────────────────────
@@ -82,6 +103,8 @@ GOPAY_PIN_CLIENT_ID_CHARGE = "47180a8e-f56e-11ed-a05b-0242ac120003-GWC"
 DEFAULT_TIMEOUT = 30
 LINK_RETRY_LIMIT = 2  # 406 "account already linked" retry
 LINK_RETRY_SLEEP_S = 12.0  # Midtrans 需要冷却 ~10s 才会让 406 → 201（实测）
+LINK_RATE_LIMIT_INITIAL_SLEEP_S = 5.0
+LINK_RATE_LIMIT_MAX_SLEEP_S = 5.0
 DEFAULT_OTP_REGEX = r"(?<!\d)(\d{6})(?!\d)"
 
 
@@ -139,6 +162,7 @@ class GoPayCharger:
         self.runtime = runtime_cfg or {}
         # separate session for non-chatgpt domains (avoid leaking chatgpt cookies)
         self.ext = _new_session()
+        self.ext_fallback = requests.Session()
         self.ext.headers.update({
             "User-Agent": (
                 self.cs.headers.get("User-Agent")
@@ -147,6 +171,7 @@ class GoPayCharger:
             ),
             "Accept-Language": "en-US,en;q=0.9",
         })
+        self.ext_fallback.headers.update(dict(self.ext.headers))
         if proxy:
             try:
                 self.cs.proxies = {"http": proxy, "https": proxy}
@@ -154,6 +179,10 @@ class GoPayCharger:
                 pass
             try:
                 self.ext.proxies = {"http": proxy, "https": proxy}
+            except Exception:
+                pass
+            try:
+                self.ext_fallback.proxies = {"http": proxy, "https": proxy}
             except Exception:
                 pass
 
@@ -370,7 +399,21 @@ class GoPayCharger:
         """GET pm-redirects.stripe.com/authorize/... → 302 to midtrans.
         Extract snap_token from the Location header.
         """
-        r = self.ext.get(pm_url, allow_redirects=False, timeout=DEFAULT_TIMEOUT)
+        try:
+            r = self.ext.get(pm_url, allow_redirects=False, timeout=DEFAULT_TIMEOUT)
+        except Exception as e:
+            host = (urlsplit(pm_url).hostname or "").lower()
+            if host == "pm-redirects.stripe.com" and _is_tls_transport_error(e):
+                self.log(
+                    "[gopay] pm-redirects curl_cffi TLS 失败，切 requests 兜底取 302 Location"
+                )
+                r = self.ext_fallback.get(
+                    pm_url,
+                    allow_redirects=False,
+                    timeout=DEFAULT_TIMEOUT,
+                )
+            else:
+                raise
         if r.status_code not in (301, 302, 303, 307, 308):
             raise GoPayError(f"pm-redirects: expected redirect, got {r.status_code}")
         loc = r.headers.get("Location", "")
@@ -405,7 +448,11 @@ class GoPayCharger:
     # ───── Step 7: Midtrans linking initiation ─────
 
     def _midtrans_init_linking(self, snap_token: str) -> str:
-        """POST snap/v3/accounts/{snap}/linking. Retries on 406."""
+        """POST snap/v3/accounts/{snap}/linking.
+
+        Retries briefly on 406 account-state races and keeps waiting on 429
+        rate limits so a temporary Midtrans throttle does not abort the run.
+        """
         url = f"https://app.midtrans.com/snap/v3/accounts/{snap_token}/linking"
         body = {
             "type": "gopay",
@@ -419,7 +466,9 @@ class GoPayCharger:
             "Referer": f"https://app.midtrans.com/snap/v4/redirection/{snap_token}",
         }
         last_err: Optional[str] = None
-        for attempt in range(1, LINK_RETRY_LIMIT + 2):
+        account_linked_attempts = 0
+        rate_limit_attempts = 0
+        while True:
             r = self.ext.post(url, json=body, headers=headers, timeout=DEFAULT_TIMEOUT)
             if r.status_code == 201:
                 data = r.json()
@@ -430,6 +479,7 @@ class GoPayCharger:
                 self.log(f"[gopay] midtrans linking ok reference={ref}")
                 return ref
             if r.status_code == 406:
+                account_linked_attempts += 1
                 try:
                     j = r.json()
                 except Exception:
@@ -440,13 +490,36 @@ class GoPayCharger:
                     last_err = str(j[0])
                 else:
                     last_err = r.text[:120]
-                self.log(f"[gopay] midtrans linking 406 ({last_err}), 冷却 {LINK_RETRY_SLEEP_S}s 再重试 {attempt}/{LINK_RETRY_LIMIT}")
+                if account_linked_attempts > LINK_RETRY_LIMIT:
+                    raise GoPayError(f"midtrans linking exhausted retries: {last_err}")
+                self.log(
+                    f"[gopay] midtrans linking 406 ({last_err}), "
+                    f"冷却 {LINK_RETRY_SLEEP_S}s 再重试 "
+                    f"{account_linked_attempts}/{LINK_RETRY_LIMIT}"
+                )
                 time.sleep(LINK_RETRY_SLEEP_S)
+                continue
+            if r.status_code == 429:
+                rate_limit_attempts += 1
+                retry_after = r.headers.get("Retry-After", "")
+                fallback_sleep = min(
+                    LINK_RATE_LIMIT_MAX_SLEEP_S,
+                    LINK_RATE_LIMIT_INITIAL_SLEEP_S * (2 ** min(rate_limit_attempts - 1, 3)),
+                )
+                sleep_s = _retry_after_seconds(
+                    retry_after,
+                    fallback_sleep,
+                    LINK_RATE_LIMIT_MAX_SLEEP_S,
+                )
+                self.log(
+                    f"[gopay] midtrans linking 429 rate limited，"
+                    f"冷却 {sleep_s:.0f}s 后继续重试 #{rate_limit_attempts}"
+                )
+                time.sleep(sleep_s)
                 continue
             raise GoPayError(
                 f"midtrans linking unexpected status={r.status_code} body={r.text[:300]}",
             )
-        raise GoPayError(f"midtrans linking exhausted retries: {last_err}")
 
     # ───── Step 8-12: GoPay linking ─────
 

@@ -225,11 +225,13 @@ def browser_register(cfg, mail_provider) -> dict:
                         continue
                     raise
             time.sleep(random.uniform(0.5, 1.2))
+            otp_window_started_at = time.time()
             # Continue
             for sel in ['button[type="submit"]', 'button:has-text("Continue")',
                         'button:has-text("Next")']:
                 b = page.query_selector(sel)
                 if b and b.is_visible():
+                    otp_window_started_at = time.time()
                     b.click()
                     logger.info(f"[browser-reg] 点击 email 继续: {sel}")
                     break
@@ -252,6 +254,7 @@ def browser_register(cfg, mail_provider) -> dict:
                             'button:has-text("Create")', 'button:has-text("Next")']:
                     b = page.query_selector(sel)
                     if b and b.is_visible():
+                        otp_window_started_at = time.time()
                         b.click()
                         logger.info(f"[browser-reg] 点击 password 继续: {sel}")
                         break
@@ -282,8 +285,8 @@ def browser_register(cfg, mail_provider) -> dict:
             # [5] OTP 步骤
             if page.query_selector('input[autocomplete="one-time-code"]') or \
                page.query_selector('input[inputmode="numeric"]'):
-                logger.info("[browser-reg] 等待 IMAP OTP ...")
-                otp_sent_at = time.time()
+                logger.info("[browser-reg] 等待 CF KV OTP ...")
+                otp_sent_at = otp_window_started_at
                 try:
                     otp_timeout = max(30, int(os.getenv("OTP_TIMEOUT", "180")))
                 except Exception:
