@@ -498,18 +498,25 @@ def test_whatsapp_file_otp_provider_reads_state(tmp_path):
 @responses.activate
 def test_whatsapp_http_otp_provider_reads_latest():
     url = "http://127.0.0.1:8765/latest"
+    logs = []
     responses.get(url, status=204)
     responses.get(
         url,
-        json={"otp": "135790", "ts": int(time.time()), "text": "GoPay OTP 135790"},
+        json={
+            "otp": "135790",
+            "ts": int(time.time()),
+            "text": "GoPay OTP 135790",
+            "source": "android_phone_worker",
+        },
     )
     provider = gopay.whatsapp_http_otp_provider(
         url,
         timeout=5.0,
         interval=0.1,
-        log=lambda _m: None,
+        log=logs.append,
     )
     assert provider() == "135790"
+    assert any("tail=**90" in msg and "source=android_phone_worker" in msg for msg in logs)
 
 
 # ────────────────── chatgpt session builder ──────────────────

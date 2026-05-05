@@ -104,6 +104,34 @@ def _first_gopay_error(payload: Any) -> tuple[str, str, bool]:
     return code, message, retryable
 
 
+def _epoch_seconds(value: Any) -> Optional[float]:
+    try:
+        ts = float(value)
+    except (TypeError, ValueError):
+        return None
+    if ts > 1_000_000_000_000:
+        ts = ts / 1000.0
+    return ts if ts > 0 else None
+
+
+def _otp_payload_metadata(payload: Any) -> dict:
+    if isinstance(payload, dict) and isinstance(payload.get("latest"), dict):
+        payload = payload["latest"]
+    if not isinstance(payload, dict):
+        return {}
+    ts = (
+        _epoch_seconds(payload.get("ts"))
+        or _epoch_seconds(payload.get("timestamp"))
+        or _epoch_seconds(payload.get("notification_ts"))
+        or _epoch_seconds(payload.get("received_at"))
+    )
+    return {
+        "ts": ts,
+        "source": payload.get("source") or payload.get("engine") or payload.get("from"),
+        "from": payload.get("from") or payload.get("author") or "",
+    }
+
+
 # ──────────────────────────── constants ───────────────────────────
 
 # OpenAI's Midtrans merchant client id (public, embedded in JS).
@@ -834,6 +862,10 @@ class GoPayCharger:
         for attempt in range(1, max_attempts + 1):
             if attempt > 1 and self.otp_validate_retry_sleep_s:
                 time.sleep(self.otp_validate_retry_sleep_s)
+            self.log(
+                f"[gopay] requesting WhatsApp OTP "
+                f"reference={reference_id[:8]} attempt={attempt}/{max_attempts}"
+            )
             self._gopay_user_consent(reference_id)
             otp = self.otp_provider()
             if not otp:
@@ -1154,6 +1186,15 @@ def whatsapp_http_otp_provider(
                     issued_after=issued_after,
                 )
                 if code:
+                    meta = _otp_payload_metadata(payload)
+                    detail = [f"tail=**{code[-2:]}", f"since={issued_after:.0f}"]
+                    if meta.get("ts"):
+                        ts = float(meta["ts"])
+                        detail.append(f"otp_ts={ts:.0f}")
+                        detail.append(f"age={max(0.0, time.time() - ts):.1f}s")
+                    if meta.get("source"):
+                        detail.append(f"source={meta['source']}")
+                    log("[gopay] received WhatsApp OTP from relay: " + " ".join(detail))
                     return code
                 last_error = ""
             except Exception as exc:
