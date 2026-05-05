@@ -380,17 +380,37 @@ def browser_register(cfg, mail_provider) -> dict:
                 except Exception:
                     return []
 
-            def _is_birthday(meta: dict) -> bool:
-                blob = " ".join([meta.get("type",""), meta.get("name",""),
+            def _meta_blob(meta: dict) -> str:
+                return " ".join([meta.get("type",""), meta.get("name",""),
                                   meta.get("placeholder",""), meta.get("ariaLabel",""),
                                   meta.get("label","")]).lower()
+
+            def _is_birthday(meta: dict) -> bool:
+                blob = _meta_blob(meta)
                 if meta.get("type") == "date":
                     return True
                 return any(kw in blob for kw in ("birth", "birthday", "dob",
                                                   "mm/dd/yyyy", "mm / dd / yyyy"))
 
+            def _is_age(meta: dict) -> bool:
+                blob = _meta_blob(meta)
+                return "age" in blob or blob.strip() in {"number age", "tel age"}
+
+            def _is_month(meta: dict) -> bool:
+                blob = _meta_blob(meta)
+                return any(kw in blob for kw in ("month", "mm"))
+
+            def _is_day(meta: dict) -> bool:
+                blob = _meta_blob(meta)
+                return any(kw in blob for kw in ("day", "dd"))
+
+            def _is_year(meta: dict) -> bool:
+                blob = _meta_blob(meta)
+                return any(kw in blob for kw in ("year", "yyyy"))
+
             full_name_input = None
             birthday_input = None
+            birthday_inputs = []
             birthday_meta = None
             for attempt in range(30):
                 metas = _enum_inputs()
@@ -398,6 +418,25 @@ def browser_register(cfg, mail_provider) -> dict:
                                   and m["type"] not in ("hidden","submit","button",
                                                          "checkbox","radio","password")]
                 # 先挑 Birthday，剩下的看作 name
+                all_inputs_el = page.query_selector_all('input')
+                month_m = next((m for m in visible_metas if _is_month(m)), None)
+                day_m = next((m for m in visible_metas if _is_day(m)), None)
+                year_m = next((m for m in visible_metas if _is_year(m)), None)
+                if month_m and day_m and year_m:
+                    part_idxs = {month_m["idx"], day_m["idx"], year_m["idx"]}
+                    name_m = next((m for m in visible_metas if m["idx"] not in part_idxs), None)
+                    if name_m:
+                        full_name_input = all_inputs_el[name_m["idx"]]
+                        birthday_inputs = [
+                            (all_inputs_el[month_m["idx"]], "month", month_m),
+                            (all_inputs_el[day_m["idx"]], "day", day_m),
+                            (all_inputs_el[year_m["idx"]], "year", year_m),
+                        ]
+                        birthday_meta = {"type": "split"}
+                        logger.info(f"[browser-reg] 表单 (split birthday): name.idx={name_m['idx']} "
+                                    f"month.idx={month_m['idx']} day.idx={day_m['idx']} "
+                                    f"year.idx={year_m['idx']}")
+                        break
                 bd = next((m for m in visible_metas if _is_birthday(m)), None)
                 name_m = next((m for m in visible_metas
                                 if m is not bd
@@ -412,12 +451,20 @@ def browser_register(cfg, mail_provider) -> dict:
                                 f"placeholder={bd['placeholder'][:30]!r}")
                     break
                 # 兼容老版 age：2 个 input 且都不匹配 birthday
-                if not bd and len(visible_metas) >= 2:
+                age_m = next((m for m in visible_metas if _is_age(m)), None)
+                name_m = next((m for m in visible_metas if m is not age_m), None)
+                if not bd and age_m and name_m:
+                    full_name_input = all_inputs_el[name_m["idx"]]
+                    birthday_input = all_inputs_el[age_m["idx"]]
+                    birthday_meta = age_m
+                    logger.info(f"[browser-reg] 表单 (legacy age): {len(visible_metas)} inputs")
+                    break
+                if not bd and len(visible_metas) == 2:
                     all_inputs_el = page.query_selector_all('input')
                     full_name_input = all_inputs_el[visible_metas[0]["idx"]]
                     birthday_input = all_inputs_el[visible_metas[1]["idx"]]
                     birthday_meta = visible_metas[1]
-                    logger.info(f"[browser-reg] 表单 (legacy age): {len(visible_metas)} inputs")
+                    logger.info(f"[browser-reg] 表单 (legacy 2-input): {len(visible_metas)} inputs")
                     break
                 if "chatgpt.com" in page.url and "auth" not in page.url:
                     break
@@ -427,7 +474,7 @@ def browser_register(cfg, mail_provider) -> dict:
                                 f"inputs visible={len(visible_metas)}")
                 time.sleep(1)
 
-            if full_name_input and birthday_input:
+            if full_name_input and (birthday_input or birthday_inputs):
                 page.screenshot(path="/tmp/browser_reg_about_you.png")
                 full_name = f"{first_name} {last_name}"
                 # Birthday：26-40 岁之间的 1 月 15 日（足够>18，固定日期便于一致指纹）
@@ -447,21 +494,33 @@ def browser_register(cfg, mail_provider) -> dict:
                     full_name_input.focus(); time.sleep(0.3)
                     page.keyboard.type(full_name, delay=random.randint(30, 80))
                     time.sleep(random.uniform(0.4, 0.9))
-                    birthday_input.focus(); time.sleep(0.3)
-                    # 先清空（预填可能有今日日期）
-                    try:
-                        page.keyboard.press("Control+A")
-                        page.keyboard.press("Delete")
-                    except Exception:
-                        pass
-                    # 对 native date input 用 fill 直接写 ISO；文本框用 keyboard.type
-                    if bd_type == "date":
+                    def _clear_active_input():
+                        try:
+                            page.keyboard.press("Control+A")
+                            page.keyboard.press("Delete")
+                        except Exception:
+                            pass
+
+                    if birthday_inputs:
+                        split_values = {"month": mm, "day": dd, "year": str(year)}
+                        for el, part, _meta in birthday_inputs:
+                            el.focus(); time.sleep(0.2)
+                            _clear_active_input()
+                            value = split_values[part]
+                            try:
+                                el.fill(value)
+                            except Exception:
+                                page.keyboard.type(value, delay=random.randint(30, 70))
+                    elif bd_type == "date":
+                        birthday_input.focus(); time.sleep(0.3)
+                        _clear_active_input()
                         try:
                             birthday_input.fill(birthday_str)
                         except Exception:
                             page.keyboard.type(birthday_str, delay=random.randint(30, 70))
                     else:
-                        # MM/DD/YYYY：为兼容 age 老版，若看起来是 number/age 就只打 age
+                        birthday_input.focus(); time.sleep(0.3)
+                        _clear_active_input()
                         if _is_birthday(birthday_meta or {}):
                             page.keyboard.type(birthday_str, delay=random.randint(30, 70))
                         else:
@@ -490,6 +549,8 @@ def browser_register(cfg, mail_provider) -> dict:
             logger.info("[browser-reg] 等待跳转回 chatgpt.com ...")
             arrived = False
             last_url = ""
+            auth_continue_last_url = ""
+            auth_continue_same_url_clicks = 0
             for i in range(120):
                 time.sleep(1)
                 cur = page.url
@@ -520,9 +581,49 @@ def browser_register(cfg, mail_provider) -> dict:
                         try:
                             b = page.query_selector(sel)
                             if b and b.is_visible():
+                                disabled = page.evaluate(
+                                    "(el) => !!(el.disabled || el.getAttribute('aria-disabled') === 'true')",
+                                    b,
+                                )
+                                if disabled:
+                                    continue
+                                before_click_url = page.url
                                 b.click()
                                 logger.info(f"[browser-reg] 中转点击: {sel}")
+                                if before_click_url == auth_continue_last_url:
+                                    auth_continue_same_url_clicks += 1
+                                else:
+                                    auth_continue_last_url = before_click_url
+                                    auth_continue_same_url_clicks = 1
+                                if auth_continue_same_url_clicks >= 3:
+                                    diag = page.evaluate('''() => {
+                                        const inputs = Array.from(document.querySelectorAll('input')).map((el, idx) => ({
+                                            idx,
+                                            type: el.type || '',
+                                            name: el.name || '',
+                                            placeholder: el.placeholder || '',
+                                            ariaLabel: el.getAttribute('aria-label') || '',
+                                            value: el.value || '',
+                                            valid: typeof el.checkValidity === 'function' ? el.checkValidity() : null,
+                                            validationMessage: el.validationMessage || ''
+                                        }));
+                                        const buttons = Array.from(document.querySelectorAll('button')).map((el, idx) => ({
+                                            idx,
+                                            text: (el.innerText || el.textContent || '').trim(),
+                                            disabled: !!el.disabled,
+                                            ariaDisabled: el.getAttribute('aria-disabled') || ''
+                                        }));
+                                        return {url: location.href, inputs, buttons, text: (document.body.innerText || '').slice(0, 1000)};
+                                    }''')
+                                    logger.warning(
+                                        "[browser-reg] auth Continue 后 URL 未变化，页面诊断: "
+                                        + json.dumps(diag, ensure_ascii=False)[:1000]
+                                    )
+                                    page.screenshot(path="/tmp/browser_reg_stalled_auth_continue.png")
+                                    raise RuntimeError(f"auth Continue 后 URL 连续停滞: {before_click_url[:120]}")
                                 break
+                        except RuntimeError:
+                            raise
                         except Exception:
                             # 页面导航时 context destroyed，忽略
                             pass

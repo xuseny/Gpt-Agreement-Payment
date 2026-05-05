@@ -35,6 +35,12 @@ DEFAULT_PUSH_PATH = "/api/whatsapp/sidecar/state"
 DEFAULT_RUN_LOGS_PATH = "/api/run/sidecar/logs"
 DEFAULT_STATE_FILE = Path("output/android-phone-worker-state.json")
 DEFAULT_GOPAY_UNLINK_TRIGGER_STRINGS = ("GoPay \u6388\u6743 + \u6263\u6b3e\u5b8c\u6210",)
+DEFAULT_OTP_FOCUS_RUN_LOG_TRIGGER_STRINGS = (
+    "[gopay] waiting WhatsApp OTP",
+    "waiting WhatsApp OTP from relay",
+    "waiting WhatsApp OTP from file",
+    "waiting WhatsApp OTP from command",
+)
 DEFAULT_OTP_FOCUS_NOTIFICATION_KEYWORDS = (
     "gopay",
     "gojek",
@@ -104,12 +110,14 @@ def _otp_focus_worker_cfg(worker_cfg: dict) -> dict:
     return value
 
 
-def _run_logs_url(worker_cfg: dict, unlink_cfg: dict) -> str:
-    explicit = str(
-        unlink_cfg.get("run_logs_url")
-        or worker_cfg.get("run_logs_url")
-        or ""
-    ).strip()
+def _run_logs_url(worker_cfg: dict, *section_cfgs: dict) -> str:
+    explicit = ""
+    for section_cfg in section_cfgs:
+        if isinstance(section_cfg, dict) and section_cfg.get("run_logs_url"):
+            explicit = str(section_cfg.get("run_logs_url") or "").strip()
+            break
+    if not explicit:
+        explicit = str(worker_cfg.get("run_logs_url") or "").strip()
     if explicit:
         return explicit
     base = (
@@ -120,7 +128,13 @@ def _run_logs_url(worker_cfg: dict, unlink_cfg: dict) -> str:
     )
     if not str(base).strip():
         raise PhoneWorkerError("phone_worker.server_base_url or PHONE_WORKER_SERVER_BASE_URL is required")
-    path = str(unlink_cfg.get("run_logs_path") or worker_cfg.get("run_logs_path") or DEFAULT_RUN_LOGS_PATH)
+    path = ""
+    for section_cfg in section_cfgs:
+        if isinstance(section_cfg, dict) and section_cfg.get("run_logs_path"):
+            path = str(section_cfg.get("run_logs_path") or "")
+            break
+    if not path:
+        path = str(worker_cfg.get("run_logs_path") or DEFAULT_RUN_LOGS_PATH)
     return _join_url(str(base), path)
 
 
@@ -285,9 +299,49 @@ def _entry_line(entry: Any) -> str:
     return str(entry or "")
 
 
-def _log_entry_matches_unlink_trigger(entry: Any, trigger_strings: list[str]) -> bool:
+def _log_entry_matches_trigger(entry: Any, trigger_strings: list[str]) -> bool:
     line = _entry_line(entry)
     return any(trigger and trigger in line for trigger in trigger_strings)
+
+
+def _log_entry_matches_unlink_trigger(entry: Any, trigger_strings: list[str]) -> bool:
+    return _log_entry_matches_trigger(entry, trigger_strings)
+
+
+def _log_entry_matches_otp_focus_trigger(entry: Any, trigger_strings: list[str]) -> bool:
+    return _log_entry_matches_trigger(entry, trigger_strings)
+
+
+def _otp_focus_run_log_trigger_strings(focus_cfg: dict) -> list[str]:
+    raw = (
+        focus_cfg.get("run_log_trigger_strings")
+        or focus_cfg.get("log_trigger_strings")
+        or focus_cfg.get("run_log_triggers")
+        or DEFAULT_OTP_FOCUS_RUN_LOG_TRIGGER_STRINGS
+    )
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(item) for item in raw if str(item).strip()]
+
+
+def _run_log_focus_event(entry: Any, *, now: Optional[float] = None) -> dict:
+    now = time.time() if now is None else now
+    seq = _entry_seq(entry)
+    line = _entry_line(entry)
+    fingerprint_raw = f"otp-focus-run-log\n{seq}\n{line}"
+    return {
+        "otp": "",
+        "ts": now,
+        "notification_ts": None,
+        "from": "run_log",
+        "source": "android_phone_worker",
+        "engine": "run_log",
+        "text": line[:500],
+        "label": "otp wait log",
+        "fingerprint": hashlib.sha256(fingerprint_raw.encode("utf-8", errors="ignore")).hexdigest(),
+    }
 
 
 def _run_configured_unlink(config_path: str, out_dir: str, *, timeout_s: float = 0.0) -> int:
@@ -329,7 +383,7 @@ def _notification_focus_keywords(focus_cfg: dict) -> list[str]:
         raw = DEFAULT_OTP_FOCUS_NOTIFICATION_KEYWORDS
     if isinstance(raw, str):
         raw = [raw]
-    if not isinstance(raw, list):
+    if not isinstance(raw, (list, tuple)):
         return []
     return [str(item).lower() for item in raw if str(item).strip()]
 
@@ -397,7 +451,9 @@ def _maybe_focus_otp_app(auto_cfg: dict, focus_cfg: dict, state_path: Path, stat
         return
     try:
         android._activate_app_adb(auto_cfg, app_cfg, label="whatsapp")
-        label = f"otp {event.get('otp')}" if event.get("otp") else "otp notification"
+        label = str(event.get("label") or "").strip()
+        if not label:
+            label = f"otp {event.get('otp')}" if event.get("otp") else "otp notification"
         _log(f"focused WhatsApp for {label}")
         state["last_otp_focus_fingerprint"] = fp
         state["last_otp_focus_at"] = time.time()
@@ -511,13 +567,22 @@ def run_worker(args: argparse.Namespace) -> int:
     otp_focus_cfg = _otp_focus_worker_cfg(worker_cfg)
     unlink_worker_cfg = _gopay_unlink_worker_cfg(worker_cfg)
     auto_unlink_enabled = bool(unlink_worker_cfg.get("enabled", False))
-    run_logs_url = _run_logs_url(worker_cfg, unlink_worker_cfg) if auto_unlink_enabled else ""
-    unlink_poll_interval_s = float(unlink_worker_cfg.get("poll_interval_s") or interval_s)
-    unlink_log_limit = int(unlink_worker_cfg.get("log_limit") or 500)
+    otp_focus_on_run_log = bool(otp_focus_cfg.get("enabled", False)) and bool(
+        otp_focus_cfg.get("focus_on_run_log", True)
+    )
+    run_log_poll_enabled = auto_unlink_enabled or otp_focus_on_run_log
+    run_logs_url = _run_logs_url(worker_cfg, unlink_worker_cfg, otp_focus_cfg) if run_log_poll_enabled else ""
+    run_log_poll_interval_s = float(
+        otp_focus_cfg.get("run_log_poll_interval_s")
+        or unlink_worker_cfg.get("poll_interval_s")
+        or interval_s
+    )
+    run_log_limit = int(otp_focus_cfg.get("run_log_limit") or unlink_worker_cfg.get("log_limit") or 500)
     unlink_out_dir = str(unlink_worker_cfg.get("out_dir") or "output/android-gopay-unlink")
     unlink_delay_s = float(unlink_worker_cfg.get("delay_after_trigger_s") or 0)
     unlink_timeout_s = float(unlink_worker_cfg.get("timeout_s") or 120)
     ignore_existing_run_logs = bool(unlink_worker_cfg.get("ignore_existing_run_logs_on_start", True))
+    otp_focus_run_log_trigger_strings = _otp_focus_run_log_trigger_strings(otp_focus_cfg)
     trigger_strings = [
         str(item)
         for item in (
@@ -541,8 +606,8 @@ def run_worker(args: argparse.Namespace) -> int:
     appium_disabled_until = 0.0
     first_scan = True
     first_run_log_scan = True
-    next_unlink_log_poll_at = 0.0
-    last_unlink_log_error_at = 0.0
+    next_run_log_poll_at = 0.0
+    last_run_log_error_at = 0.0
     next_screen_keepalive_at = 0.0
     try:
         while True:
@@ -550,14 +615,14 @@ def run_worker(args: argparse.Namespace) -> int:
                 android._keep_screen_awake(auto_cfg)
                 next_screen_keepalive_at = time.time() + max(5.0, screen_keepalive_interval_s)
 
-            if auto_unlink_enabled and time.time() >= next_unlink_log_poll_at:
-                next_unlink_log_poll_at = time.time() + max(0.5, unlink_poll_interval_s)
+            if run_log_poll_enabled and time.time() >= next_run_log_poll_at:
+                next_run_log_poll_at = time.time() + max(0.5, run_log_poll_interval_s)
                 try:
                     log_payload = _fetch_run_log_payload(
                         run_logs_url,
                         token,
                         since_seq=last_run_log_seq,
-                        limit=unlink_log_limit,
+                        limit=run_log_limit,
                         timeout=post_timeout_s,
                     )
                     status = log_payload.get("status") if isinstance(log_payload.get("status"), dict) else {}
@@ -583,13 +648,40 @@ def run_worker(args: argparse.Namespace) -> int:
                             state["last_run_log_seq"] = last_run_log_seq
                             _save_state(state_path, state)
                         else:
+                            otp_focus_entry = None
+                            if otp_focus_on_run_log:
+                                for entry in lines:
+                                    if _log_entry_matches_otp_focus_trigger(
+                                        entry,
+                                        otp_focus_run_log_trigger_strings,
+                                    ):
+                                        otp_focus_entry = entry
+                                        break
                             trigger_entry = None
-                            for entry in lines:
-                                if _log_entry_matches_unlink_trigger(entry, trigger_strings):
-                                    trigger_entry = entry
-                                    break
+                            if auto_unlink_enabled:
+                                for entry in lines:
+                                    if _log_entry_matches_unlink_trigger(entry, trigger_strings):
+                                        trigger_entry = entry
+                                        break
                             last_run_log_seq = max_seq
                             state["last_run_log_seq"] = last_run_log_seq
+                            if otp_focus_entry is not None:
+                                otp_focus_seq = _entry_seq(otp_focus_entry)
+                                state["last_otp_focus_run_log_seq"] = otp_focus_seq
+                                state["last_otp_focus_run_log_line"] = _entry_line(otp_focus_entry)[:300]
+                                state["last_otp_focus_run_log_at"] = time.time()
+                                _save_state(state_path, state)
+                                _log(
+                                    f"otp focus trigger seq={otp_focus_seq}: "
+                                    f"{_entry_line(otp_focus_entry)[:120]}"
+                                )
+                                _maybe_focus_otp_app(
+                                    auto_cfg,
+                                    otp_focus_cfg,
+                                    state_path,
+                                    state,
+                                    _run_log_focus_event(otp_focus_entry),
+                                )
                             if trigger_entry is not None:
                                 trigger_seq = _entry_seq(trigger_entry)
                                 state["last_unlink_trigger_seq"] = trigger_seq
@@ -637,9 +729,9 @@ def run_worker(args: argparse.Namespace) -> int:
                         first_run_log_scan = False
                 except Exception as exc:
                     now = time.time()
-                    if now - last_unlink_log_error_at >= skip_log_interval_s:
+                    if now - last_run_log_error_at >= skip_log_interval_s:
                         _log(str(exc) if isinstance(exc, PhoneWorkerError) else f"run log poll failed: {exc}")
-                        last_unlink_log_error_at = now
+                        last_run_log_error_at = now
 
             payload = None
             engine = "android_adb_dumpsys"

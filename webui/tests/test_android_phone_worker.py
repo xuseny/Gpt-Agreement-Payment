@@ -212,6 +212,18 @@ def test_run_logs_url_joins_default_path(monkeypatch):
     assert url == "https://example.com/webui/api/run/sidecar/logs"
 
 
+def test_run_logs_url_accepts_otp_focus_section_path(monkeypatch):
+    monkeypatch.delenv("PHONE_WORKER_SERVER_BASE_URL", raising=False)
+
+    url = phone_worker._run_logs_url(
+        {"server_base_url": "https://example.com/webui/"},
+        {},
+        {"run_logs_path": "/api/custom/logs"},
+    )
+
+    assert url == "https://example.com/webui/api/custom/logs"
+
+
 def test_log_entry_matches_gopay_unlink_trigger():
     entry = {"seq": 7, "line": "      GoPay 授权 + 扣款完成，继续 poll 结果 ..."}
 
@@ -223,3 +235,31 @@ def test_log_entry_matches_gopay_unlink_trigger():
         entry,
         ["PayPal 授权完成"],
     )
+
+
+def test_log_entry_matches_otp_focus_trigger_from_relay_wait():
+    entry = {
+        "seq": 8,
+        "line": "[gopay] waiting WhatsApp OTP from relay: http://127.0.0.1:8765/api/whatsapp/latest-otp",
+    }
+
+    assert phone_worker._log_entry_matches_otp_focus_trigger(
+        entry,
+        phone_worker._otp_focus_run_log_trigger_strings({}),
+    )
+
+
+def test_run_log_focus_event_uses_run_log_fingerprint():
+    entry = {
+        "seq": 9,
+        "line": "[gopay] waiting WhatsApp OTP from relay: http://127.0.0.1:8765/api/whatsapp/latest-otp",
+    }
+
+    event = phone_worker._run_log_focus_event(entry, now=1777947001)
+
+    assert event["otp"] == ""
+    assert event["ts"] == 1777947001
+    assert event["from"] == "run_log"
+    assert event["engine"] == "run_log"
+    assert event["label"] == "otp wait log"
+    assert event["fingerprint"]

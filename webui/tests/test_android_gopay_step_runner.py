@@ -30,7 +30,7 @@ def test_step_runner_text_contains_matches_content_description(tmp_path):
             self.clicks += 1
 
     class Driver:
-        page_source = "<hierarchy />"
+        page_source = '<hierarchy><node content-desc="Profile" /></hierarchy>'
 
         def __init__(self, element):
             self.element = element
@@ -112,6 +112,45 @@ def test_step_runner_tap_row_uses_exact_linked_apps_row(tmp_path):
     assert not any('textContains("Linked apps")' in selector for _, selector in driver.selectors)
 
 
+def test_step_runner_tap_row_skips_appium_when_text_absent_from_source(tmp_path):
+    class By:
+        ID = "id"
+        XPATH = "xpath"
+        ACCESSIBILITY_ID = "accessibility_id"
+        ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+    class Driver:
+        page_source = """
+        <hierarchy>
+          <node content-desc="Popular service permission" />
+          <node content-desc="No permission setting recorded" />
+        </hierarchy>
+        """
+
+        def __init__(self):
+            self.find_calls = 0
+
+        def find_element(self, *_args):
+            self.find_calls += 1
+            raise RuntimeError("uia2 should not be called")
+
+    driver = Driver()
+    runner = android_gopay.StepRunner(driver, By, log=lambda _msg: None)
+
+    try:
+        runner.run(
+            [{"action": "tap_row", "text": "Linked apps", "timeout_s": 0.01}],
+            out_dir=tmp_path,
+        )
+    except android_gopay.AndroidAutomationError as exc:
+        assert "text not present in current page_source" in str(exc)
+    else:
+        raise AssertionError("expected AndroidAutomationError")
+
+    assert driver.find_calls == 0
+    assert (tmp_path / "step_01_error.xml").exists()
+
+
 def test_step_runner_state_flow_advances_until_terminal(tmp_path):
     class By:
         ID = "id"
@@ -168,6 +207,55 @@ def test_step_runner_state_flow_advances_until_terminal(tmp_path):
 
     assert result["terminal_state"] == "done"
     assert result["history"] == ["profile", "linked_apps", "done"]
+
+
+def test_step_runner_state_match_accepts_xml_escaped_text(tmp_path):
+    class By:
+        ID = "id"
+        XPATH = "xpath"
+        ACCESSIBILITY_ID = "accessibility_id"
+        ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+    class Element:
+        def __init__(self, driver):
+            self.driver = driver
+
+        def click(self):
+            self.driver.page_source = '<hierarchy><node content-desc="No apps linked to your GoPay" /></hierarchy>'
+
+    class Driver:
+        def __init__(self):
+            self.page_source = (
+                '<hierarchy><node pane-title="Account &amp; app settings" />'
+                '<node content-desc="Linked apps" /></hierarchy>'
+            )
+
+        def find_element(self, _by, selector):
+            if "Linked apps" in selector:
+                return Element(self)
+            raise RuntimeError("missing")
+
+    runner = android_gopay.StepRunner(Driver(), By, log=lambda _msg: None)
+
+    result = runner.run_states(
+        [
+            {
+                "name": "linked_apps",
+                "match_any": ["No apps linked to your GoPay"],
+                "terminal": True,
+            },
+            {
+                "name": "profile_settings",
+                "match_any": ["Account & app settings"],
+                "steps": [{"action": "tap_row", "text": "Linked apps", "timeout_s": 0.01}],
+            },
+        ],
+        out_dir=tmp_path,
+        max_iterations=3,
+        settle_s=0,
+    )
+
+    assert result["history"] == ["profile_settings", "linked_apps"]
 
 
 def test_step_runner_terminal_state_runs_cleanup_steps(tmp_path):

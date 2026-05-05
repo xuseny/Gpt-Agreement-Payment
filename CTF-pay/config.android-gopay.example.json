@@ -49,7 +49,14 @@
         "verification",
         "code"
       ],
-      "start_wait_s": 1
+      "start_wait_s": 1,
+      "focus_on_run_log": true,
+      "run_log_trigger_strings": [
+        "[gopay] waiting WhatsApp OTP",
+        "waiting WhatsApp OTP from relay",
+        "waiting WhatsApp OTP from file",
+        "waiting WhatsApp OTP from command"
+      ]
     },
     "gopay_unlink": {
       "enabled": true,
@@ -125,6 +132,7 @@
       "activate_wait_s": 2,
       "state_max_iterations": 30,
       "state_settle_s": 0.7,
+      "exit_to_home_on_complete": true,
       "states": [
         {
           "name": "already_unlinked",
@@ -209,15 +217,49 @@
           ]
         },
         {
-          "name": "profile_settings",
+          "name": "popular_service_permission",
           "match_any": [
+            "Popular service permission",
+            "No permission setting recorded"
+          ],
+          "max_visits": 2,
+          "dump_on_enter": true,
+          "steps": [
+            {
+              "action": "back"
+            }
+          ]
+        },
+        {
+          "name": "profile_settings",
+          "match_all": [
             "Account & app settings",
-            "Pengaturan akun"
+            "Linked apps"
           ],
           "steps": [
             {
-              "action": "tap",
-              "text_contains": "Account & app settings",
+              "action": "tap_row",
+              "text_any": [
+                "Linked apps",
+                "Aplikasi tertaut"
+              ],
+              "timeout_s": 8
+            }
+          ]
+        },
+        {
+          "name": "profile_settings_id",
+          "match_all": [
+            "Pengaturan akun",
+            "Aplikasi tertaut"
+          ],
+          "steps": [
+            {
+              "action": "tap_row",
+              "text_any": [
+                "Linked apps",
+                "Aplikasi tertaut"
+              ],
               "timeout_s": 8
             }
           ]
@@ -230,8 +272,11 @@
           ],
           "steps": [
             {
-              "action": "tap",
-              "text_contains": "Profile",
+              "action": "tap_row",
+              "text_any": [
+                "Account & app settings",
+                "Pengaturan akun"
+              ],
               "timeout_s": 5
             }
           ]

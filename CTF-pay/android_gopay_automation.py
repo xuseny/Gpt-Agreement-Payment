@@ -10,6 +10,7 @@ user-owned emulator/device.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import random
@@ -527,6 +528,10 @@ def _driver(auto_cfg: dict, *, app_cfg: Optional[dict] = None):
     caps.setdefault("platformName", "Android")
     caps.setdefault("automationName", "UiAutomator2")
     caps.setdefault("deviceName", auto_cfg.get("device_name") or "Android")
+    caps.setdefault(
+        "uiautomator2ServerReadTimeout",
+        int(auto_cfg.get("uiautomator2_server_read_timeout_ms") or 15000),
+    )
     if auto_cfg.get("adb_serial"):
         caps.setdefault("udid", auto_cfg.get("adb_serial"))
     if app_cfg:
@@ -538,10 +543,15 @@ def _driver(auto_cfg: dict, *, app_cfg: Optional[dict] = None):
             caps.setdefault("appActivity", activity)
     options = UiAutomator2Options()
     options.load_capabilities(caps)
-    driver = webdriver.Remote(
-        command_executor=str(auto_cfg.get("appium_server_url") or "http://127.0.0.1:4723"),
-        options=options,
-    )
+    server_url = str(auto_cfg.get("appium_server_url") or "http://127.0.0.1:4723")
+    try:
+        driver = webdriver.Remote(
+            command_executor=server_url,
+            options=options,
+        )
+    except Exception as exc:
+        detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+        raise AndroidAutomationError(f"appium session failed at {server_url}: {detail}") from exc
     try:
         driver.implicitly_wait(float(auto_cfg.get("implicit_wait_s", 0.2)))
     except Exception:
@@ -596,6 +606,14 @@ class StepRunner:
             raise last_exc
         raise AndroidAutomationError(f"empty text selector for step={step!r}")
 
+    def _source_values(self) -> tuple[str, str]:
+        source = self.driver.page_source or ""
+        return source, html.unescape(source)
+
+    def _source_contains_any_now(self, values: list[str]) -> bool:
+        source_values = self._source_values()
+        return any(v and any(v in item for item in source_values) for v in values)
+
     def _tap_element_row(self, element: Any, step: dict) -> None:
         try:
             rect = dict(getattr(element, "rect", {}) or {})
@@ -625,6 +643,7 @@ class StepRunner:
         timeout = float(step.get("timeout_s", 20))
         deadline = time.time() + timeout
         last_exc = None
+        page_source_gate = bool(step.get("page_source_gate", True))
         while True:
             try:
                 if step.get("id"):
@@ -635,9 +654,13 @@ class StepRunner:
                     return self.driver.find_element(self.appium_by.ACCESSIBILITY_ID, str(step["accessibility_id"]))
                 exact_texts = self._text_values(step, "text")
                 if exact_texts:
+                    if page_source_gate and not self._source_contains_any_now(exact_texts):
+                        raise AndroidAutomationError(f"text not present in current page_source: {exact_texts}")
                     return self._find_by_exact_text(exact_texts, step)
                 if step.get("text_contains"):
                     escaped = str(step["text_contains"]).replace('"', '\\"')
+                    if page_source_gate and not self._source_contains_any_now([str(step["text_contains"])]):
+                        raise AndroidAutomationError(f"text not present in current page_source: {step['text_contains']!r}")
                     selectors = [f'new UiSelector().textContains("{escaped}")']
                     if step.get("match_content_desc", step.get("match_description", True)):
                         selectors.append(f'new UiSelector().descriptionContains("{escaped}")')
@@ -649,6 +672,10 @@ class StepRunner:
                     raise last_exc
                 if step.get("description_contains"):
                     escaped = str(step["description_contains"]).replace('"', '\\"')
+                    if page_source_gate and not self._source_contains_any_now([str(step["description_contains"])]):
+                        raise AndroidAutomationError(
+                            f"description not present in current page_source: {step['description_contains']!r}"
+                        )
                     return self.driver.find_element(
                         self.appium_by.ANDROID_UIAUTOMATOR,
                         f'new UiSelector().descriptionContains("{escaped}")',
@@ -663,8 +690,7 @@ class StepRunner:
     def _source_has_any(self, values: list[str], timeout_s: float) -> bool:
         deadline = time.time() + timeout_s
         while True:
-            source = self.driver.page_source
-            if any(v and v in source for v in values):
+            if self._source_contains_any_now(values):
                 return True
             if time.time() >= deadline:
                 return False
@@ -682,11 +708,12 @@ class StepRunner:
             any_values.append(f'text="{exact}"')
         if contains:
             any_values.append(contains)
-        if none_values and any(v in source for v in none_values):
+        source_values = (source, html.unescape(source))
+        if none_values and any(v and any(v in item for item in source_values) for v in none_values):
             return False
-        if all_values and not all(v in source for v in all_values):
+        if all_values and not all(v and any(v in item for item in source_values) for v in all_values):
             return False
-        if any_values and not any(v in source for v in any_values):
+        if any_values and not any(v and any(v in item for item in source_values) for v in any_values):
             return False
         return bool(any_values or all_values)
 
@@ -718,49 +745,58 @@ class StepRunner:
             action = str(step.get("action") or "").strip().lower()
             name = str(step.get("name") or f"step_{idx:02d}")
             self._log(f"step={name} action={action}")
-            if action == "sleep":
-                time.sleep(float(step.get("seconds", 1)))
-            elif action == "tap":
-                self._find(step).click()
-            elif action == "tap_row":
-                self._tap_element_row(self._find(step), step)
-            elif action == "tap_optional":
-                try:
+            try:
+                if action == "sleep":
+                    time.sleep(float(step.get("seconds", 1)))
+                elif action == "tap":
                     self._find(step).click()
-                except AndroidAutomationError:
-                    pass
-            elif action == "tap_row_optional":
-                try:
+                elif action == "tap_row":
                     self._tap_element_row(self._find(step), step)
-                except AndroidAutomationError:
-                    pass
-            elif action == "input":
-                el = self._find(step)
-                if step.get("clear", True):
-                    el.clear()
-                el.send_keys(str(step.get("value") or ""))
-            elif action == "wait":
-                self._find(step)
-            elif action == "wait_text_any":
-                values = [str(x) for x in step.get("values", [])]
-                if not self._source_has_any(values, float(step.get("timeout_s", 20))):
-                    raise AndroidAutomationError(f"none of expected values found: {values}")
-            elif action == "back":
-                self.driver.back()
-            elif action == "back_if_text_any":
-                values = [str(x) for x in step.get("values", [])]
-                if self._source_has_any(values, float(step.get("timeout_s", 1))):
+                elif action == "tap_optional":
+                    try:
+                        self._find(step).click()
+                    except AndroidAutomationError:
+                        pass
+                elif action == "tap_row_optional":
+                    try:
+                        self._tap_element_row(self._find(step), step)
+                    except AndroidAutomationError:
+                        pass
+                elif action == "input":
+                    el = self._find(step)
+                    if step.get("clear", True):
+                        el.clear()
+                    el.send_keys(str(step.get("value") or ""))
+                elif action == "wait":
+                    self._find(step)
+                elif action == "wait_text_any":
+                    values = [str(x) for x in step.get("values", [])]
+                    if not self._source_has_any(values, float(step.get("timeout_s", 20))):
+                        raise AndroidAutomationError(f"none of expected values found: {values}")
+                elif action == "back":
                     self.driver.back()
-            elif action == "press_keycode":
-                self.driver.press_keycode(int(step.get("keycode")))
-            elif action == "dump":
-                self._dump(out_dir, name)
-            elif action == "assert_text_any":
-                values = [str(x) for x in step.get("values", [])]
-                if not self._source_has_any(values, float(step.get("timeout_s", 20))):
-                    raise AndroidAutomationError(f"none of expected values found: {values}")
-            else:
-                raise AndroidAutomationError(f"unsupported action in step #{idx}: {action}")
+                elif action == "back_if_text_any":
+                    values = [str(x) for x in step.get("values", [])]
+                    if self._source_has_any(values, float(step.get("timeout_s", 1))):
+                        self.driver.back()
+                elif action == "press_keycode":
+                    self.driver.press_keycode(int(step.get("keycode")))
+                elif action == "dump":
+                    self._dump(out_dir, name)
+                elif action == "assert_text_any":
+                    values = [str(x) for x in step.get("values", [])]
+                    if not self._source_has_any(values, float(step.get("timeout_s", 20))):
+                        raise AndroidAutomationError(f"none of expected values found: {values}")
+                else:
+                    raise AndroidAutomationError(f"unsupported action in step #{idx}: {action}")
+            except Exception:
+                safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or f"step_{idx:02d}"
+                try:
+                    self._dump(out_dir, f"{safe_name}_error")
+                except Exception:
+                    pass
+                raise
+            self._log(f"step={name} done")
 
     def run_states(
         self,
@@ -888,6 +924,7 @@ def cmd_unlink(args: argparse.Namespace) -> int:
     _activate_app_adb(auto_cfg, unlink_cfg, label="gopay")
     _, _UiAutomator2Options, AppiumBy = _import_appium()
     driver = _driver(auto_cfg, app_cfg=unlink_cfg)
+    completed = False
     try:
         if _app_package(unlink_cfg):
             try:
@@ -906,6 +943,7 @@ def cmd_unlink(args: argparse.Namespace) -> int:
         else:
             runner.run(steps, out_dir=Path(args.out))
             print(json.dumps({"ok": True, "steps": len(steps)}, ensure_ascii=False))
+        completed = True
         return 0
     finally:
         try:
@@ -915,6 +953,8 @@ def cmd_unlink(args: argparse.Namespace) -> int:
         except Exception:
             pass
         driver.quit()
+        if completed and unlink_cfg.get("exit_to_home_on_complete", True):
+            _adb_best_effort(auto_cfg, ["shell", "input", "keyevent", "3"], timeout=5.0)
         _clear_android_proxy(auto_cfg)
 
 

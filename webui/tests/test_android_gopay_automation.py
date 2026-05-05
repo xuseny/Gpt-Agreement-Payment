@@ -79,7 +79,55 @@ def test_config_example_uses_android_otp_command():
     assert "android_gopay_automation.py" in " ".join(cfg["gopay"]["otp"]["command"])
     assert cfg["android_automation"]["adb_serial"]
     assert cfg["phone_worker"]["notification_source"] == "adb"
+    assert cfg["phone_worker"]["otp_focus"]["focus_on_run_log"] is True
+    assert "waiting WhatsApp OTP from relay" in cfg["phone_worker"]["otp_focus"]["run_log_trigger_strings"]
     assert cfg["android_automation"]["otp"]["notification_source"] == "adb"
+
+
+def test_config_example_unlink_targets_linked_apps_from_profile_settings():
+    cfg = json.loads((ROOT / "CTF-pay" / "config.android-gopay.example.json").read_text())
+    states = {
+        state["name"]: state
+        for state in cfg["android_automation"]["gopay_unlink"]["states"]
+    }
+
+    profile_tab_step = states["profile_tab"]["steps"][0]
+    assert profile_tab_step["action"] == "tap_row"
+    assert "Account & app settings" in profile_tab_step["text_any"]
+    assert profile_tab_step.get("text_contains") is None
+
+    profile_settings = states["profile_settings"]
+    assert profile_settings["match_all"] == ["Account & app settings", "Linked apps"]
+    profile_settings_step = profile_settings["steps"][0]
+    assert profile_settings_step["action"] == "tap_row"
+    assert "Linked apps" in profile_settings_step["text_any"]
+    assert profile_settings_step.get("text_contains") is None
+    assert states["profile_settings_id"]["match_all"] == ["Pengaturan akun", "Aplikasi tertaut"]
+    assert states["popular_service_permission"]["steps"][0]["action"] == "back"
+    assert cfg["android_automation"]["gopay_unlink"]["exit_to_home_on_complete"] is True
+
+
+def test_driver_wraps_appium_session_failure(monkeypatch):
+    class WebDriver:
+        @staticmethod
+        def Remote(**_kwargs):
+            raise RuntimeError("HTTPConnectionPool(host='127.0.0.1', port=4723): failed\ntrace line")
+
+    class Options:
+        def load_capabilities(self, _caps):
+            pass
+
+    monkeypatch.setattr(android_gopay, "_import_appium", lambda: (WebDriver, Options, object()))
+
+    try:
+        android_gopay._driver({"appium_server_url": "http://127.0.0.1:4723"})
+    except android_gopay.AndroidAutomationError as exc:
+        message = str(exc)
+        assert "appium session failed at http://127.0.0.1:4723" in message
+        assert "HTTPConnectionPool" in message
+        assert "trace line" not in message
+    else:
+        raise AssertionError("expected AndroidAutomationError")
 
 
 def test_proxy_pool_normalizes_authenticated_urls():
@@ -141,6 +189,71 @@ def test_keep_screen_awake_wakes_and_dismisses_keyguard(monkeypatch):
     assert android_gopay._keep_screen_awake({"screen": {"enabled": True}})
     assert ["shell", "input", "keyevent", "224"] in calls
     assert ["shell", "wm", "dismiss-keyguard"] in calls
+
+
+def test_cmd_unlink_sends_adb_home_after_success(monkeypatch, tmp_path):
+    calls = []
+
+    cfg = {
+        "android_automation": {
+            "adb_path": "adb",
+            "adb_serial": "serial-1",
+            "gopay_unlink": {
+                "package": "com.gojek.gopay",
+                "states": [
+                    {
+                        "name": "done",
+                        "default": True,
+                        "terminal": True,
+                    }
+                ],
+                "exit_to_home_on_complete": True,
+            },
+        }
+    }
+
+    class By:
+        ID = "id"
+        XPATH = "xpath"
+        ACCESSIBILITY_ID = "accessibility_id"
+        ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+    class Driver:
+        page_source = '<hierarchy><node text="No apps linked to your GoPay" /></hierarchy>'
+
+        def implicitly_wait(self, _seconds):
+            pass
+
+        def activate_app(self, _package):
+            pass
+
+        def save_screenshot(self, path):
+            Path(path).write_bytes(b"png")
+
+        def quit(self):
+            pass
+
+    class Args:
+        config = "config.json"
+        out = str(tmp_path)
+
+    monkeypatch.setattr(android_gopay, "_load_json", lambda _path: cfg)
+    monkeypatch.setattr(android_gopay, "_adb_connect", lambda _auto_cfg: None)
+    monkeypatch.setattr(android_gopay, "_configure_screen_awake", lambda _auto_cfg: None)
+    monkeypatch.setattr(android_gopay, "_set_android_proxy", lambda _auto_cfg: None)
+    monkeypatch.setattr(android_gopay, "_keep_screen_awake", lambda _auto_cfg: None)
+    monkeypatch.setattr(android_gopay, "_activate_app_adb", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(android_gopay, "_import_appium", lambda: (object(), object(), By))
+    monkeypatch.setattr(android_gopay, "_driver", lambda *_args, **_kwargs: Driver())
+
+    def fake_adb_best_effort(_auto_cfg, args, timeout=10.0):
+        calls.append((args, timeout))
+        return True
+
+    monkeypatch.setattr(android_gopay, "_adb_best_effort", fake_adb_best_effort)
+
+    assert android_gopay.cmd_unlink(Args()) == 0
+    assert (["shell", "input", "keyevent", "3"], 5.0) in calls
 
 
 def test_dumpsys_notification_payload_keeps_matching_package():
