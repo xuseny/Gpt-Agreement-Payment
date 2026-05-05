@@ -570,6 +570,57 @@ class StepRunner:
         else:
             print(f"[android-gopay] {message}", flush=True)
 
+    def _text_values(self, step: dict, key: str = "text") -> list[str]:
+        values = step.get(f"{key}_any") or step.get(f"{key}s") or []
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            values = []
+        if step.get(key):
+            values = [step.get(key)] + values
+        return [str(value) for value in values if str(value).strip()]
+
+    def _find_by_exact_text(self, values: list[str], step: dict):
+        last_exc = None
+        for value in values:
+            escaped = value.replace('"', '\\"')
+            selectors = [f'new UiSelector().text("{escaped}")']
+            if step.get("match_content_desc", step.get("match_description", True)):
+                selectors.append(f'new UiSelector().description("{escaped}")')
+            for selector in selectors:
+                try:
+                    return self.driver.find_element(self.appium_by.ANDROID_UIAUTOMATOR, selector)
+                except Exception as exc:
+                    last_exc = exc
+        if last_exc:
+            raise last_exc
+        raise AndroidAutomationError(f"empty text selector for step={step!r}")
+
+    def _tap_element_row(self, element: Any, step: dict) -> None:
+        try:
+            rect = dict(getattr(element, "rect", {}) or {})
+            x = float(rect.get("x") or 0) + float(rect.get("width") or 0) / 2
+            y = float(rect.get("y") or 0) + float(rect.get("height") or 0) / 2
+            if step.get("row_center_x", True):
+                try:
+                    size = self.driver.get_window_size()
+                    x = float(size.get("width") or 0) * float(step.get("row_x_ratio") or 0.5)
+                except Exception:
+                    pass
+            try:
+                self.driver.execute_script("mobile: clickGesture", {"x": int(x), "y": int(y)})
+                return
+            except Exception:
+                pass
+            try:
+                self.driver.tap([(int(x), int(y))])
+                return
+            except Exception:
+                pass
+        except Exception:
+            pass
+        element.click()
+
     def _find(self, step: dict):
         timeout = float(step.get("timeout_s", 20))
         deadline = time.time() + timeout
@@ -582,17 +633,9 @@ class StepRunner:
                     return self.driver.find_element(self.appium_by.XPATH, str(step["xpath"]))
                 if step.get("accessibility_id"):
                     return self.driver.find_element(self.appium_by.ACCESSIBILITY_ID, str(step["accessibility_id"]))
-                if step.get("text"):
-                    escaped = str(step["text"]).replace('"', '\\"')
-                    selectors = [f'new UiSelector().text("{escaped}")']
-                    if step.get("match_content_desc", step.get("match_description", True)):
-                        selectors.append(f'new UiSelector().description("{escaped}")')
-                    for selector in selectors:
-                        try:
-                            return self.driver.find_element(self.appium_by.ANDROID_UIAUTOMATOR, selector)
-                        except Exception as exc:
-                            last_exc = exc
-                    raise last_exc
+                exact_texts = self._text_values(step, "text")
+                if exact_texts:
+                    return self._find_by_exact_text(exact_texts, step)
                 if step.get("text_contains"):
                     escaped = str(step["text_contains"]).replace('"', '\\"')
                     selectors = [f'new UiSelector().textContains("{escaped}")']
@@ -679,9 +722,16 @@ class StepRunner:
                 time.sleep(float(step.get("seconds", 1)))
             elif action == "tap":
                 self._find(step).click()
+            elif action == "tap_row":
+                self._tap_element_row(self._find(step), step)
             elif action == "tap_optional":
                 try:
                     self._find(step).click()
+                except AndroidAutomationError:
+                    pass
+            elif action == "tap_row_optional":
+                try:
+                    self._tap_element_row(self._find(step), step)
                 except AndroidAutomationError:
                     pass
             elif action == "input":

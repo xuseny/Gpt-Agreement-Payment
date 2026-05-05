@@ -199,8 +199,11 @@
           ],
           "steps": [
             {
-              "action": "tap",
-              "text_contains": "Linked apps",
+              "action": "tap_row",
+              "text_any": [
+                "Linked apps",
+                "Aplikasi tertaut"
+              ],
               "timeout_s": 8
             }
           ]
@@ -274,8 +277,11 @@
           "timeout_s": 3
         },
         {
-          "action": "tap",
-          "text_contains": "Linked apps",
+          "action": "tap_row",
+          "text_any": [
+            "Linked apps",
+            "Aplikasi tertaut"
+          ],
           "timeout_s": 20
         },
         {

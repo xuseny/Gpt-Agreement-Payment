@@ -56,6 +56,62 @@ def test_step_runner_text_contains_matches_content_description(tmp_path):
     assert any('descriptionContains("Profile")' in selector for _, selector in driver.selectors)
 
 
+def test_step_runner_tap_row_uses_exact_linked_apps_row(tmp_path):
+    class By:
+        ID = "id"
+        XPATH = "xpath"
+        ACCESSIBILITY_ID = "accessibility_id"
+        ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+    class Element:
+        def __init__(self, y):
+            self.rect = {"x": 24, "y": y, "width": 312, "height": 48}
+            self.clicks = 0
+
+        def click(self):
+            self.clicks += 1
+
+    class Driver:
+        page_source = """
+        <hierarchy>
+          <node text="Popular service permission" bounds="[24,180][336,228]" />
+          <node text="Linked apps" bounds="[24,260][336,308]" />
+        </hierarchy>
+        """
+
+        def __init__(self):
+            self.linked = Element(260)
+            self.popular = Element(180)
+            self.selectors = []
+            self.gestures = []
+
+        def find_element(self, by, selector):
+            self.selectors.append((by, selector))
+            if 'text("Linked apps")' in selector:
+                return self.linked
+            if 'textContains("Linked apps")' in selector:
+                return self.popular
+            raise RuntimeError("missing")
+
+        def get_window_size(self):
+            return {"width": 360, "height": 800}
+
+        def execute_script(self, script, payload):
+            self.gestures.append((script, payload))
+
+    driver = Driver()
+    runner = android_gopay.StepRunner(driver, By, log=lambda _msg: None)
+
+    runner.run(
+        [{"action": "tap_row", "text": "Linked apps", "timeout_s": 0.01}],
+        out_dir=tmp_path,
+    )
+
+    assert driver.gestures == [("mobile: clickGesture", {"x": 180, "y": 284})]
+    assert any('text("Linked apps")' in selector for _, selector in driver.selectors)
+    assert not any('textContains("Linked apps")' in selector for _, selector in driver.selectors)
+
+
 def test_step_runner_state_flow_advances_until_terminal(tmp_path):
     class By:
         ID = "id"
@@ -97,7 +153,7 @@ def test_step_runner_state_flow_advances_until_terminal(tmp_path):
             {
                 "name": "linked_apps",
                 "match_any": ["Linked apps"],
-                "steps": [{"action": "tap", "text_contains": "Linked apps", "timeout_s": 0.01}],
+                "steps": [{"action": "tap_row", "text": "Linked apps", "timeout_s": 0.01}],
             },
             {
                 "name": "profile",

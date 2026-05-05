@@ -26,7 +26,7 @@
                 :key="m.value"
                 class="mode-pill"
                 :class="{ active: form.mode === m.value }"
-                :disabled="status.running"
+                :disabled="status.running || keepRunning"
                 @click="form.mode = m.value"
               >{{ m.label }}</button>
             </div>
@@ -86,23 +86,33 @@
 
         <div class="step-actions">
           <TermBtn variant="ghost" :loading="configHealthLoading" @click="checkConfigHealth">检查配置</TermBtn>
-          <TermBtn v-if="!status.running" :loading="starting" @click="start">▶ 开始运行</TermBtn>
-          <TermBtn v-else variant="danger" :loading="stopping" @click="stop">■ 停止</TermBtn>
+          <TermBtn v-if="!status.running" :loading="starting" @click="start()">▶ 开始运行</TermBtn>
+          <TermBtn
+            v-if="canKeepRunning"
+            :variant="keepRunning ? 'danger' : 'ghost'"
+            :loading="continuousBusy"
+            :disabled="starting || stopping"
+            @click="toggleKeepRunning"
+          >{{ keepRunning ? "■ 停止一直运行" : "∞ 一直运行" }}</TermBtn>
+          <TermBtn v-if="status.running && !keepRunning" variant="danger" :loading="stopping" @click="stop()">■ 停止</TermBtn>
         </div>
 
         <div class="status-line" :class="{ running: status.running }">
           <span v-if="status.running">
             <span class="status-dot">●</span>
             运行中 PID {{ status.pid }} // 模式 {{ status.mode }} // {{ runtimeText }}
+            <span v-if="keepRunning" class="continuous-badge">一直运行</span>
           </span>
           <span v-else-if="status.ended_at">
             <span class="status-dot ok" v-if="status.exit_code === 0">●</span>
             <span class="status-dot err" v-else>●</span>
             上次运行已退出 // 退出码 {{ status.exit_code }} //
             {{ runtimeText }}
+            <span v-if="keepRunning" class="continuous-badge">等待下一轮</span>
           </span>
           <span v-else>
             <span class="status-dot idle">○</span> 空闲
+            <span v-if="keepRunning" class="continuous-badge">等待下一轮</span>
           </span>
         </div>
       </section>
@@ -383,6 +393,8 @@ const cmdPreview = ref("xvfb-run -a python pipeline.py --config CTF-pay/config.p
 const lines = ref<{ seq: number; ts: number; line: string }[]>([]);
 const starting = ref(false);
 const stopping = ref(false);
+const keepRunning = ref(false);
+const continuousBusy = ref(false);
 const configHealth = ref<ConfigHealthResponse | null>(null);
 const configHealthLoading = ref(false);
 const inventory = ref<InventoryResponse>({
@@ -416,6 +428,7 @@ let clockTimer: ReturnType<typeof setInterval> | undefined;
 let statusTimer: ReturnType<typeof setInterval> | undefined;
 let inventoryTimer: ReturnType<typeof setInterval> | undefined;
 let eventSource: EventSource | null = null;
+let continuousRestartTimer: ReturnType<typeof setTimeout> | undefined;
 
 function tick() {
   const d = new Date();
@@ -443,6 +456,8 @@ const visibleHealthChecks = computed(() => {
   const important = checks.filter((c) => c.status !== "ok" || c.blocking);
   return important.length ? important : checks;
 });
+
+const canKeepRunning = computed(() => form.value.mode === "single");
 
 function formatElapsed(s: number) {
   if (s < 60) return `${s}s`;
@@ -703,12 +718,16 @@ async function refreshPreview() {
 
 async function refreshStatus() {
   try {
+    const wasRunning = status.value.running;
     const r = await api.get<RunStatus>("/run/status");
     status.value = r.data;
     if (!r.data.otp_pending && otpDialog.value.open) {
       otpDialog.value.open = false;
       otpDialog.value.value = "";
       otpDialog.value.submitting = false;
+    }
+    if (wasRunning && !r.data.running && keepRunning.value && !eventSource) {
+      scheduleContinuousRestart();
     }
   } catch {}
 }
@@ -728,38 +747,105 @@ async function checkConfigHealth() {
   }
 }
 
-async function start() {
+function clearContinuousRestart() {
+  if (continuousRestartTimer) {
+    clearTimeout(continuousRestartTimer);
+    continuousRestartTimer = undefined;
+  }
+}
+
+function scheduleContinuousRestart() {
+  clearContinuousRestart();
+  if (!keepRunning.value || !canKeepRunning.value) return;
+  continuousRestartTimer = setTimeout(async () => {
+    continuousRestartTimer = undefined;
+    if (!keepRunning.value || !canKeepRunning.value || status.value.running) return;
+    const ok = await start({ continuous: true });
+    if (!ok && keepRunning.value) {
+      keepRunning.value = false;
+      message.error("下一轮启动失败，一直运行已停止");
+    }
+  }, 1200);
+}
+
+async function start(options: { continuous?: boolean } = {}): Promise<boolean> {
+  if (status.value.running || starting.value) return false;
   starting.value = true;
   try {
     const health = await checkConfigHealth();
     if (!health?.ok) {
       const first = health?.blocking?.[0];
       message.error(first?.message || "配置健康检查未通过，已阻止启动");
-      return;
+      return false;
     }
     await api.post("/run/start", form.value);
-    message.success("已启动");
+    message.success(options.continuous ? "下一轮已启动" : "已启动");
     lines.value = [];
     await refreshStatus();
     await refreshInventory();
     openStream();
+    return true;
   } catch (e: any) {
     message.error(healthErrorText(e) || "启动失败");
+    return false;
   } finally {
     starting.value = false;
   }
 }
 
-async function stop() {
+async function stop(options: { continuous?: boolean } = {}) {
   stopping.value = true;
   try {
     await api.post("/run/stop");
-    message.success("已发送 SIGTERM");
+    message.success(options.continuous ? "已停止一直运行" : "已发送 SIGTERM");
     await refreshStatus();
   } catch (e: any) {
     message.error(e.response?.data?.detail || "停止失败");
   } finally {
     stopping.value = false;
+  }
+}
+
+async function startKeepRunning() {
+  if (!canKeepRunning.value) {
+    message.warning("一直运行只支持 single — 1× 模式");
+    return;
+  }
+  keepRunning.value = true;
+  clearContinuousRestart();
+  if (status.value.running) {
+    message.success("一直运行已开启，本轮结束后自动开始下一轮");
+    return;
+  }
+  continuousBusy.value = true;
+  try {
+    const ok = await start({ continuous: true });
+    if (!ok) keepRunning.value = false;
+  } finally {
+    continuousBusy.value = false;
+  }
+}
+
+async function stopKeepRunning() {
+  keepRunning.value = false;
+  clearContinuousRestart();
+  continuousBusy.value = true;
+  try {
+    if (status.value.running) {
+      await stop({ continuous: true });
+    } else {
+      message.success("已停止一直运行");
+    }
+  } finally {
+    continuousBusy.value = false;
+  }
+}
+
+function toggleKeepRunning() {
+  if (keepRunning.value) {
+    stopKeepRunning();
+  } else {
+    startKeepRunning();
   }
 }
 
@@ -796,6 +882,7 @@ function openStream() {
     otpDialog.value.open = false;
     await refreshStatus();
     await refreshInventory();
+    scheduleContinuousRestart();
   });
   eventSource.onerror = () => {
     // 连接断开，不自动 retry
@@ -835,6 +922,10 @@ const isFreeMode = computed(() =>
 watch(
   () => [form.value.mode, form.value.paypal, form.value.gopay, form.value.pay_only, form.value.register_only, form.value.batch, form.value.workers, form.value.self_dealer, form.value.count],
   () => {
+    if (keepRunning.value && !canKeepRunning.value) {
+      keepRunning.value = false;
+      clearContinuousRestart();
+    }
     configHealth.value = null;
     refreshPreview();
   },
@@ -874,6 +965,7 @@ onBeforeUnmount(() => {
   if (clockTimer) clearInterval(clockTimer);
   if (statusTimer) clearInterval(statusTimer);
   if (inventoryTimer) clearInterval(inventoryTimer);
+  clearContinuousRestart();
   if (eventSource) eventSource.close();
 });
 </script>
@@ -939,7 +1031,7 @@ onBeforeUnmount(() => {
   line-height: 1.6;
 }
 
-.step-actions { margin-top: 16px; margin-bottom: 0; }
+.step-actions { margin-top: 16px; margin-bottom: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 .health-panel {
   margin-top: 12px;
@@ -1004,6 +1096,7 @@ onBeforeUnmount(() => {
 .status-dot.ok { color: var(--ok); }
 .status-dot.err { color: var(--err); }
 .status-dot.idle { color: var(--fg-tertiary); }
+.continuous-badge { display: inline-block; margin-left: 10px; padding: 1px 6px; border: 1px solid var(--accent); color: var(--accent); font-size: 11px; }
 
 .inventory-divider { margin-top: 22px; }
 .inventory-head {
