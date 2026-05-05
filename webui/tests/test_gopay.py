@@ -329,6 +329,8 @@ def test_retryable_otp_rejection_requests_fresh_otp(monkeypatch):
     assert result["state"] == "succeeded"
     assert seen_otps == ["111111", "222222"]
     assert consent_refs == [LINK_REF, LINK_REF]
+    assert any("otp=111111" in msg for msg in logs)
+    assert any("otp=222222" in msg for msg in logs)
     assert any("requesting a fresh OTP" in msg for msg in logs)
 
 

@@ -870,6 +870,10 @@ class GoPayCharger:
             otp = self.otp_provider()
             if not otp:
                 raise OTPCancelled("OTP not provided")
+            self.log(
+                f"[gopay] submitting WhatsApp OTP "
+                f"reference={reference_id[:8]} attempt={attempt}/{max_attempts} otp={otp}"
+            )
             try:
                 challenge_id, client_id = self._gopay_validate_otp(reference_id, otp)
                 break
