@@ -705,6 +705,11 @@ async function refreshStatus() {
   try {
     const r = await api.get<RunStatus>("/run/status");
     status.value = r.data;
+    if (!r.data.otp_pending && otpDialog.value.open) {
+      otpDialog.value.open = false;
+      otpDialog.value.value = "";
+      otpDialog.value.submitting = false;
+    }
   } catch {}
 }
 
@@ -779,6 +784,11 @@ function openStream() {
       otpDialog.value.open = true;
       otpDialog.value.value = "";
     }
+  });
+  eventSource.addEventListener("otp_clear", () => {
+    otpDialog.value.open = false;
+    otpDialog.value.value = "";
+    otpDialog.value.submitting = false;
   });
   eventSource.addEventListener("done", async () => {
     eventSource?.close();

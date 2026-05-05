@@ -200,6 +200,21 @@ def _detect_otp_wait_target(line: str) -> tuple[str, Optional[Path]]:
     return "", None
 
 
+def _line_clears_otp_pending(line: str) -> bool:
+    return any(
+        marker in line
+        for marker in (
+            "[gopay] received WhatsApp OTP from relay:",
+            "[gopay] submitting WhatsApp OTP",
+            "[gopay] otp ok",
+            "[gopay] linking complete",
+            "[gopay] chatgpt verify ok",
+            "支付成功",
+            "payment succeeded",
+        )
+    )
+
+
 def _drain(proc: subprocess.Popen) -> None:
     global _ended_at, _exit_code, _seq_counter, _log_lines, _otp_pending, _otp_file, _otp_to_db, _otp_file_is_temp
     try:
@@ -224,6 +239,8 @@ def _drain(proc: subprocess.Popen) -> None:
                     _otp_file = wait_path
                     _otp_file_is_temp = _otp_file_is_temp or "GOPAY_OTP_REQUEST" in line
                     _otp_pending = True
+                elif _otp_pending and _line_clears_otp_pending(line):
+                    _otp_pending = False
     finally:
         proc.wait()
         with _lock:

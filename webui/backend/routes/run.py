@@ -74,9 +74,10 @@ def get_logs(tail: int = 500, user: str = CurrentUser):
 async def stream(user: str = CurrentUser):
     """SSE: 每 300ms 检查 / 推送新日志行。"""
     last_seq = 0
+    last_otp_pending: bool | None = None
 
     async def gen():
-        nonlocal last_seq
+        nonlocal last_seq, last_otp_pending
         # Backlog: 先推最近 200 行
         for entry in runner.get_tail(200):
             last_seq = max(last_seq, entry["seq"])
@@ -89,8 +90,14 @@ async def stream(user: str = CurrentUser):
                 last_seq = entry["seq"]
                 yield {"event": "line", "data": json.dumps(entry)}
             st = runner.status()
-            # OTP heartbeat: re-send periodically while pending
-            if st.get("otp_pending"):
+            otp_pending = bool(st.get("otp_pending"))
+            if otp_pending != last_otp_pending:
+                last_otp_pending = otp_pending
+                if otp_pending:
+                    yield {"event": "otp_pending", "data": json.dumps({"pending": True})}
+                else:
+                    yield {"event": "otp_clear", "data": json.dumps({"pending": False})}
+            elif otp_pending:
                 yield {"event": "otp_pending", "data": json.dumps({"pending": True})}
             if not st["running"]:
                 # 进程已退出，再扫一次确保没遗漏，然后发 done

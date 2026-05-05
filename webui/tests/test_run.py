@@ -145,3 +145,18 @@ def test_gopay_auto_otp_skips_manual_fifo(tmp_path, monkeypatch):
     monkeypatch.setattr(runner_mod.s, "PAY_CONFIG_PATH", cfg)
 
     assert runner_mod._gopay_auto_otp_enabled() is True
+
+
+def test_gopay_auto_otp_log_clears_pending():
+    import webui.backend.runner as runner_mod
+
+    assert runner_mod._line_clears_otp_pending(
+        "[gopay] received WhatsApp OTP from relay: tail=**85"
+    )
+    assert runner_mod._line_clears_otp_pending(
+        "[gopay] submitting WhatsApp OTP reference=abc attempt=1/3 otp=123456"
+    )
+    assert runner_mod._line_clears_otp_pending("[gopay] otp ok challenge_id=abcdef")
+    assert not runner_mod._line_clears_otp_pending(
+        "[gopay] waiting WhatsApp OTP from relay: http://127.0.0.1:8765/api/whatsapp/latest-otp"
+    )
