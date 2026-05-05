@@ -31,7 +31,7 @@ class AndroidAutomationError(RuntimeError):
 
 
 def _load_json(path: Path) -> dict:
-    with path.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8-sig") as f:
         data = json.load(f)
     if not isinstance(data, dict):
         raise AndroidAutomationError(f"config root must be an object: {path}")
@@ -370,11 +370,15 @@ def cmd_otp(args: argparse.Namespace) -> int:
     deadline = time.time() + timeout_s
     try:
         while time.time() < deadline:
-            payload = driver.execute_script("mobile: getNotifications", {})
-            code = _find_otp_in_notifications(payload, otp_cfg)
-            if code:
-                print(code)
-                return 0
+            try:
+                payload = driver.execute_script("mobile: getNotifications", {})
+                code = _find_otp_in_notifications(payload, otp_cfg)
+                if code:
+                    print(code)
+                    return 0
+            except Exception as exc:
+                detail = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
+                print(f"[android-gopay] notification poll failed: {detail}", file=sys.stderr)
             time.sleep(max(0.5, interval_s))
         return 1
     finally:

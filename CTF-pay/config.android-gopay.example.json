@@ -19,9 +19,9 @@
   },
   "android_automation": {
     "adb_path": "adb",
-    "adb_serial": "127.0.0.1:16384",
+    "adb_serial": "3B65AA01QGE00000",
     "appium_server_url": "http://127.0.0.1:4723",
-    "device_name": "MuMu",
+    "device_name": "Android Phone",
     "capabilities": {
       "platformName": "Android",
       "automationName": "UiAutomator2",
