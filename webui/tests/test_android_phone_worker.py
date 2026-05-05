@@ -93,6 +93,13 @@ def test_should_skip_older_notification_after_newer_push():
     assert reason == "stale_notification"
 
 
+def test_push_delay_remaining_waits_after_notification_timestamp():
+    event = {"otp": "123456", "ts": 1777946000, "notification_ts": 1777946000}
+
+    assert phone_worker._push_delay_remaining(event, 20, now=1777946005) == 15
+    assert phone_worker._push_delay_remaining(event, 20, now=1777946021) == 0
+
+
 def test_push_url_joins_base_and_path(monkeypatch):
     monkeypatch.delenv("PHONE_WORKER_SERVER_BASE_URL", raising=False)
 

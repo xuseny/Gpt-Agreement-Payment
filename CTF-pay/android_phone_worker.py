@@ -224,6 +224,15 @@ def _should_skip_event(event: dict, state: dict, *, first_scan: bool, ignore_exi
     return ""
 
 
+def _push_delay_remaining(event: dict, delay_s: float, *, now: Optional[float] = None) -> float:
+    if delay_s <= 0:
+        return 0.0
+    current = time.time() if now is None else now
+    event_ts = _coerce_epoch(event.get("notification_ts")) or _coerce_epoch(event.get("ts")) or current
+    age_s = max(0.0, current - event_ts)
+    return max(0.0, delay_s - age_s)
+
+
 def _remember_event(path: Path, state: dict, event: dict, *, pushed: bool) -> None:
     state.update({
         "last_fingerprint": event.get("fingerprint") or "",
@@ -249,6 +258,11 @@ def run_worker(args: argparse.Namespace) -> int:
     interval_s = float(args.interval or worker_cfg.get("poll_interval_s") or otp_cfg.get("poll_interval_s") or 2)
     post_timeout_s = float(worker_cfg.get("post_timeout_s") or 10)
     dedupe_window_s = float(worker_cfg.get("dedupe_window_s") or 180)
+    push_delay_s = float(
+        worker_cfg.get("push_delay_after_notification_s")
+        or worker_cfg.get("push_delay_s")
+        or 20
+    )
     skip_log_interval_s = float(worker_cfg.get("skip_log_interval_s") or 60)
     notification_source = str(
         worker_cfg.get("notification_source")
@@ -348,6 +362,30 @@ def run_worker(args: argparse.Namespace) -> int:
                     return 1
                 first_scan = False
                 time.sleep(max(0.5, interval_s))
+                continue
+
+            delay_remaining_s = 0.0 if args.force else _push_delay_remaining(event, push_delay_s)
+            if delay_remaining_s > 0:
+                delay_key = f"{event.get('fingerprint') or event.get('otp') or ''}:{int(float(event.get('ts') or 0))}"
+                try:
+                    last_delay_log_at = float(state.get("last_delay_log_at") or 0.0)
+                except Exception:
+                    last_delay_log_at = 0.0
+                now = time.time()
+                should_log_delay = (
+                    delay_key != state.get("last_delay_log_key")
+                    or now - last_delay_log_at >= skip_log_interval_s
+                )
+                if should_log_delay:
+                    _log(
+                        f"wait otp {event['otp']} "
+                        f"{delay_remaining_s:.1f}s before push"
+                    )
+                    state["last_delay_log_key"] = delay_key
+                    state["last_delay_log_at"] = now
+                    _save_state(state_path, state)
+                first_scan = False
+                time.sleep(max(0.5, min(interval_s, delay_remaining_s)))
                 continue
 
             payload = _build_push_payload(event, auto_cfg)

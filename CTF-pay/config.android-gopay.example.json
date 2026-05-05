@@ -28,6 +28,7 @@
     "poll_interval_s": 2,
     "post_timeout_s": 10,
     "dedupe_window_s": 180,
+    "push_delay_after_notification_s": 20,
     "ignore_existing_on_start": true,
     "state_file": "output/android-phone-worker-state.json",
     "set_proxy_on_start": true,
