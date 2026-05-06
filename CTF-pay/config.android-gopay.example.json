@@ -198,7 +198,15 @@
           "name": "linked_apps",
           "match_all": [
             "Linked apps",
+            "OpenAI LLC",
+            "Linked on",
             "Unlink"
+          ],
+          "match_none": [
+            "Account & app settings",
+            "Pengaturan akun",
+            "Popular service permission",
+            "No apps linked to your GoPay"
           ],
           "steps": [
             {

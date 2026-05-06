@@ -430,6 +430,7 @@ def test_configured_gopay_unlink_state_flow_returns_to_account_settings(tmp_path
         <hierarchy>
           <node pane-title="Account &amp; app settings" bounds="[0,0][1080,2364]" />
           <node content-desc="Popular service permission&#10;Manage information sharing permissions for each integrated app service." clickable="true" heading="false" bounds="[48,700][1032,940]" />
+          <node content-desc="Unlink" clickable="false" bounds="[64,740][112,788]" />
           <node content-desc="Linked apps&#10;List of apps that you link to GoPay" clickable="true" heading="false" bounds="[48,940][1032,1120]" />
         </hierarchy>
         """,

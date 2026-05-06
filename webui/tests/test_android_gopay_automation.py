@@ -117,7 +117,9 @@ def test_config_example_unlink_targets_linked_apps_from_profile_settings():
     assert account_app_settings_step["row_center_x"] is True
     assert account_app_settings_step.get("text_contains") is None
     assert states["account_app_settings_id"]["match_all"] == ["Pengaturan akun", "Aplikasi tertaut"]
-    assert states["linked_apps"]["match_all"] == ["Linked apps", "Unlink"]
+    assert states["linked_apps"]["match_all"] == ["Linked apps", "OpenAI LLC", "Linked on", "Unlink"]
+    assert "Account & app settings" in states["linked_apps"]["match_none"]
+    assert "Popular service permission" in states["linked_apps"]["match_none"]
     assert states["linked_apps"]["steps"][0]["action"] == "tap_source_text"
     assert states["linked_apps"]["steps"][0]["max_y_ratio"] == 0.45
     assert "Unlink OpenAI" in states["unlink_confirm"]["match_any"]
