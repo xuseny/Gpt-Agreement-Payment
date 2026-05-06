@@ -27,6 +27,12 @@ from typing import Any, Callable, Iterable, Optional
 DEFAULT_CONFIG = Path(__file__).with_name("config.android-gopay.example.json")
 DEFAULT_CODE_REGEX = r"(?<!\d)(\d{6})(?!\d)"
 DEFAULT_KEYWORDS = ("gopay", "gojek", "whatsapp", "otp", "kode", "verifikasi", "verification", "code")
+DEFAULT_MUMU_ADB_SERIALS = (
+    "127.0.0.1:16416",
+    "127.0.0.1:5557",
+    "127.0.0.1:16384",
+    "127.0.0.1:7555",
+)
 _OTP_CONTEXT_RE = r"otp|one[-\s]*time|password|verification|verify|code|kode|verifikasi|gopay|gojek"
 
 
@@ -240,6 +246,94 @@ def _run_adb(adb_path: str, serial: str, args: list[str], timeout: float = 20.0)
     )
 
 
+def _split_adb_serials(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        items = value
+    else:
+        items = re.split(r"[,;\s]+", str(value or ""))
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        serial = str(item or "").strip()
+        if not serial or serial in seen:
+            continue
+        seen.add(serial)
+        result.append(serial)
+    return result
+
+
+def _configured_adb_serial(auto_cfg: dict) -> str:
+    for name in ("PHONE_WORKER_ADB_SERIAL", "ANDROID_ADB_SERIAL", "MUMU_ADB_SERIAL", "ANDROID_SERIAL"):
+        value = str(os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return str(auto_cfg.get("adb_serial") or "").strip()
+
+
+def _configured_adb_path(auto_cfg: dict) -> str:
+    for name in ("PHONE_WORKER_ADB_PATH", "ANDROID_ADB_PATH", "ADB_PATH"):
+        value = str(os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return str(auto_cfg.get("adb_path") or "adb")
+
+
+def _configured_adb_connect_serials(auto_cfg: dict, serial: str) -> list[str]:
+    values: list[str] = []
+    for name in ("PHONE_WORKER_ADB_CONNECT_SERIALS", "ANDROID_ADB_CONNECT_SERIALS"):
+        values.extend(_split_adb_serials(os.environ.get(name)))
+    for key in ("adb_connect_serials", "adb_connect_candidates", "mumu_adb_serials"):
+        values.extend(_split_adb_serials(auto_cfg.get(key)))
+    if str(auto_cfg.get("emulator") or "").strip().lower() == "mumu" or auto_cfg.get("mumu_auto_connect"):
+        values.extend(DEFAULT_MUMU_ADB_SERIALS)
+    if serial and serial.lower() not in {"auto", "detect"} and ":" in serial:
+        values.insert(0, serial)
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if item and item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+
+def _parse_adb_devices(stdout: str) -> list[str]:
+    devices: list[str] = []
+    for raw_line in str(stdout or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.lower().startswith("list of devices"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            devices.append(parts[0])
+    return devices
+
+
+def _adb_devices(adb_path: str) -> list[str]:
+    proc = subprocess.run(
+        [adb_path or "adb", "devices"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise AndroidAutomationError(f"adb devices failed: {proc.stderr or proc.stdout}")
+    return _parse_adb_devices(proc.stdout or "")
+
+
+def _adb_connect_ok(proc: subprocess.CompletedProcess) -> bool:
+    output = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
+    if proc.returncode != 0:
+        return False
+    failure_markers = ("cannot connect", "failed to connect", "unable", "refused", "10061")
+    return not any(marker in output for marker in failure_markers)
+
+
 def _dumpsys_notification_payload(raw: str, otp_cfg: Optional[dict] = None) -> dict:
     text = raw or ""
     package_filters = []
@@ -353,21 +447,50 @@ def _select_proxy_host_port(proxy_cfg: dict, *, chooser=random.choice) -> str:
 
 
 def _adb_connect(auto_cfg: dict) -> None:
-    serial = str(auto_cfg.get("adb_serial") or "").strip()
-    if not serial or ":" not in serial:
+    adb_path = _configured_adb_path(auto_cfg)
+    auto_cfg["adb_path"] = adb_path
+    serial = _configured_adb_serial(auto_cfg)
+    candidates = _configured_adb_connect_serials(auto_cfg, serial)
+    auto_serial = not serial or serial.lower() in {"auto", "detect"}
+    last_error = ""
+    for candidate in candidates:
+        if ":" not in candidate:
+            continue
+        proc = subprocess.run(
+            [adb_path, "connect", candidate],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+        )
+        if not _adb_connect_ok(proc):
+            last_error = (proc.stderr or proc.stdout or "").strip()
+
+    if not auto_serial:
+        auto_cfg["adb_serial"] = serial
+        if ":" in serial:
+            devices = _adb_devices(adb_path)
+            if serial not in devices:
+                detail = f": {last_error}" if last_error else ""
+                raise AndroidAutomationError(f"adb connect failed for {serial}{detail}")
         return
-    adb_path = str(auto_cfg.get("adb_path") or "adb")
-    proc = subprocess.run(
-        [adb_path, "connect", serial],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=20,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise AndroidAutomationError(f"adb connect failed: {proc.stderr or proc.stdout}")
+
+    devices = _adb_devices(adb_path)
+    for candidate in candidates:
+        if candidate in devices:
+            auto_cfg["adb_serial"] = candidate
+            return
+    if len(devices) == 1:
+        auto_cfg["adb_serial"] = devices[0]
+        return
+    if len(devices) > 1:
+        raise AndroidAutomationError(
+            f"multiple adb devices found; set android_automation.adb_serial explicitly: {', '.join(devices)}"
+        )
+    detail = f"; last connect error: {last_error}" if last_error else ""
+    raise AndroidAutomationError(f"no adb device found for auto adb_serial{detail}")
 
 
 def _set_android_proxy(auto_cfg: dict) -> None:

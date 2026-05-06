@@ -77,7 +77,9 @@ def test_config_example_uses_android_otp_command():
 
     assert cfg["gopay"]["otp"]["source"] == "command"
     assert "android_gopay_automation.py" in " ".join(cfg["gopay"]["otp"]["command"])
-    assert cfg["android_automation"]["adb_serial"]
+    assert cfg["android_automation"]["adb_serial"] == "auto"
+    assert cfg["android_automation"]["emulator"] == "mumu"
+    assert "127.0.0.1:16416" in cfg["android_automation"]["adb_connect_serials"]
     assert cfg["phone_worker"]["notification_source"] == "adb"
     assert cfg["phone_worker"]["otp_focus"]["focus_on_run_log"] is True
     assert "waiting WhatsApp OTP from relay" in cfg["phone_worker"]["otp_focus"]["run_log_trigger_strings"]
@@ -156,6 +158,60 @@ def test_proxy_pool_normalizes_authenticated_urls():
     value = android_gopay._select_proxy_host_port(proxy_cfg, chooser=lambda items: items[0])
 
     assert value == "proxy.example:18898"
+
+
+def test_adb_connect_auto_resolves_mumu_candidate(monkeypatch):
+    calls = []
+
+    class Proc:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(cmd, **_kwargs):
+        calls.append(cmd)
+        if cmd[1] == "connect":
+            return Proc(stdout=f"connected to {cmd[2]}")
+        if cmd[1] == "devices":
+            return Proc(stdout="List of devices attached\n127.0.0.1:16416\tdevice\n")
+        raise AssertionError(f"unexpected adb command: {cmd}")
+
+    monkeypatch.setenv("PHONE_WORKER_ADB_PATH", r"C:\MuMu\adb.exe")
+    monkeypatch.setenv("PHONE_WORKER_ADB_SERIAL", "auto")
+    monkeypatch.setenv("PHONE_WORKER_ADB_CONNECT_SERIALS", "127.0.0.1:16416;127.0.0.1:5557")
+    monkeypatch.setattr(android_gopay.subprocess, "run", fake_run)
+
+    cfg = {"adb_path": "adb", "adb_serial": "old-device", "emulator": "mumu"}
+    android_gopay._adb_connect(cfg)
+
+    assert cfg["adb_path"] == r"C:\MuMu\adb.exe"
+    assert cfg["adb_serial"] == "127.0.0.1:16416"
+    assert [r"C:\MuMu\adb.exe", "connect", "127.0.0.1:16416"] in calls
+
+
+def test_adb_connect_explicit_tcp_serial_raises_when_not_connected(monkeypatch):
+    class Proc:
+        def __init__(self, returncode=0, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[1] == "connect":
+            return Proc(returncode=1, stderr="cannot connect to 127.0.0.1:16416")
+        if cmd[1] == "devices":
+            return Proc(stdout="List of devices attached\n")
+        raise AssertionError(f"unexpected adb command: {cmd}")
+
+    monkeypatch.setattr(android_gopay.subprocess, "run", fake_run)
+
+    try:
+        android_gopay._adb_connect({"adb_path": "adb", "adb_serial": "127.0.0.1:16416"})
+    except android_gopay.AndroidAutomationError as exc:
+        assert "adb connect failed for 127.0.0.1:16416" in str(exc)
+    else:
+        raise AssertionError("expected AndroidAutomationError")
 
 
 def test_configure_screen_awake_sends_adb_keepalive_commands(monkeypatch):

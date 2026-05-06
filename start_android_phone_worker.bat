@@ -8,6 +8,9 @@ set "WORKER=CTF-pay\android_phone_worker.py"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 
+if not defined PHONE_WORKER_ADB_SERIAL set "PHONE_WORKER_ADB_SERIAL=auto"
+if not defined PHONE_WORKER_ADB_CONNECT_SERIALS set "PHONE_WORKER_ADB_CONNECT_SERIALS=127.0.0.1:16416;127.0.0.1:5557;127.0.0.1:16384;127.0.0.1:7555"
+
 echo [android-phone-worker] Project: %CD%
 
 if not exist "%CONFIG%" (
@@ -30,17 +33,24 @@ if errorlevel 1 (
   exit /b 1
 )
 
-where adb >nul 2>nul
-if errorlevel 1 (
-  echo [android-phone-worker] adb is not in PATH.
-  echo [android-phone-worker] Install Android platform-tools or add adb.exe to PATH.
-  pause
-  exit /b 1
-)
+if defined PHONE_WORKER_ADB_PATH if exist "%PHONE_WORKER_ADB_PATH%" set "ADB_EXE=%PHONE_WORKER_ADB_PATH%"
 
 for /f "delims=" %%I in ('where adb 2^>nul') do (
   if not defined ADB_EXE set "ADB_EXE=%%I"
 )
+
+if not defined ADB_EXE if exist "C:\Program Files\Netease\MuMu Player 12\shell\adb.exe" set "ADB_EXE=C:\Program Files\Netease\MuMu Player 12\shell\adb.exe"
+if not defined ADB_EXE if exist "C:\Program Files (x86)\Netease\MuMu Player 12\shell\adb.exe" set "ADB_EXE=C:\Program Files (x86)\Netease\MuMu Player 12\shell\adb.exe"
+if not defined ADB_EXE if exist "C:\Program Files\Netease\MuMuPlayer-12.0\shell\adb.exe" set "ADB_EXE=C:\Program Files\Netease\MuMuPlayer-12.0\shell\adb.exe"
+
+if not defined ADB_EXE (
+  echo [android-phone-worker] adb is not in PATH and MuMu adb.exe was not found.
+  echo [android-phone-worker] Install Android platform-tools, add adb.exe to PATH, or set PHONE_WORKER_ADB_PATH.
+  pause
+  exit /b 1
+)
+
+set "PHONE_WORKER_ADB_PATH=%ADB_EXE%"
 
 for %%I in ("%ADB_EXE%\..") do set "PLATFORM_TOOLS=%%~fI"
 for %%I in ("%PLATFORM_TOOLS%\..") do set "SDK_ROOT=%%~fI"
@@ -50,9 +60,18 @@ set "ANDROID_SDK_ROOT=%SDK_ROOT%"
 
 echo [android-phone-worker] adb: %ADB_EXE%
 echo [android-phone-worker] ANDROID_HOME: %ANDROID_HOME%
+echo [android-phone-worker] ADB serial: %PHONE_WORKER_ADB_SERIAL%
+echo [android-phone-worker] ADB connect candidates: %PHONE_WORKER_ADB_CONNECT_SERIALS%
+
+set "ADB_CONNECT_LIST=%PHONE_WORKER_ADB_CONNECT_SERIALS:,= %"
+set "ADB_CONNECT_LIST=%ADB_CONNECT_LIST:;= %"
+for %%S in (%ADB_CONNECT_LIST%) do (
+  echo [android-phone-worker] adb connect %%S
+  "%ADB_EXE%" connect %%S >nul 2>nul
+)
 
 echo [android-phone-worker] Connected Android devices:
-adb devices
+"%ADB_EXE%" devices
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ok = Test-NetConnection 127.0.0.1 -Port 4723 -InformationLevel Quiet -WarningAction SilentlyContinue; if (-not $ok) { exit 1 }"
