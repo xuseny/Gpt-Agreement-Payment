@@ -294,6 +294,10 @@ interface RunStatus {
   exit_code: number | null;
   log_count: number;
   otp_pending?: boolean;
+  continuous_enabled?: boolean;
+  continuous_restart_at?: number | null;
+  continuous_restart_attempt?: number;
+  continuous_last_error?: string;
 }
 
 interface InventoryAccount {
@@ -429,6 +433,8 @@ let statusTimer: ReturnType<typeof setInterval> | undefined;
 let inventoryTimer: ReturnType<typeof setInterval> | undefined;
 let eventSource: EventSource | null = null;
 let continuousRestartTimer: ReturnType<typeof setTimeout> | undefined;
+let streamReconnectTimer: ReturnType<typeof setTimeout> | undefined;
+let continuousStartFailures = 0;
 
 function tick() {
   const d = new Date();
@@ -721,13 +727,19 @@ async function refreshStatus() {
     const wasRunning = status.value.running;
     const r = await api.get<RunStatus>("/run/status");
     status.value = r.data;
+    if (r.data.continuous_enabled && canKeepRunning.value) {
+      keepRunning.value = true;
+    }
     if (!r.data.otp_pending && otpDialog.value.open) {
       otpDialog.value.open = false;
       otpDialog.value.value = "";
       otpDialog.value.submitting = false;
     }
-    if (wasRunning && !r.data.running && keepRunning.value && !eventSource) {
+    if (wasRunning && !r.data.running && keepRunning.value && !eventSource && !r.data.continuous_enabled) {
       scheduleContinuousRestart();
+    }
+    if (r.data.running && keepRunning.value && !eventSource) {
+      openStream();
     }
   } catch {}
 }
@@ -754,18 +766,47 @@ function clearContinuousRestart() {
   }
 }
 
+function clearStreamReconnect() {
+  if (streamReconnectTimer) {
+    clearTimeout(streamReconnectTimer);
+    streamReconnectTimer = undefined;
+  }
+}
+
 function scheduleContinuousRestart() {
   clearContinuousRestart();
   if (!keepRunning.value || !canKeepRunning.value) return;
   continuousRestartTimer = setTimeout(async () => {
     continuousRestartTimer = undefined;
     if (!keepRunning.value || !canKeepRunning.value || status.value.running) return;
-    const ok = await start({ continuous: true });
-    if (!ok && keepRunning.value) {
-      keepRunning.value = false;
-      message.error("下一轮启动失败，一直运行已停止");
+    if (status.value.continuous_enabled) {
+      scheduleStreamReconnect();
+      return;
     }
-  }, 1200);
+    const ok = await start({ continuous: true });
+    if (ok) {
+      continuousStartFailures = 0;
+    } else if (keepRunning.value) {
+      continuousStartFailures += 1;
+      scheduleContinuousRestart();
+    }
+  }, Math.min(60000, 1200 * (2 ** Math.min(continuousStartFailures, 5))));
+}
+
+function scheduleStreamReconnect() {
+  clearStreamReconnect();
+  if (!keepRunning.value || !canKeepRunning.value) return;
+  streamReconnectTimer = setTimeout(async () => {
+    streamReconnectTimer = undefined;
+    if (!keepRunning.value || !canKeepRunning.value) return;
+    await refreshStatus();
+    await refreshInventory();
+    if (status.value.running) {
+      openStream();
+    } else {
+      scheduleStreamReconnect();
+    }
+  }, 1500);
 }
 
 async function start(options: { continuous?: boolean } = {}): Promise<boolean> {
@@ -778,7 +819,8 @@ async function start(options: { continuous?: boolean } = {}): Promise<boolean> {
       message.error(first?.message || "配置健康检查未通过，已阻止启动");
       return false;
     }
-    await api.post("/run/start", form.value);
+    const payload = { ...form.value, continuous: !!options.continuous || keepRunning.value };
+    await api.post("/run/start", payload);
     message.success(options.continuous ? "下一轮已启动" : "已启动");
     lines.value = [];
     await refreshStatus();
@@ -813,6 +855,15 @@ async function startKeepRunning() {
   }
   keepRunning.value = true;
   clearContinuousRestart();
+  clearStreamReconnect();
+  continuousStartFailures = 0;
+  try {
+    await api.post("/run/continuous", { ...form.value, enabled: true });
+  } catch (e: any) {
+    keepRunning.value = false;
+    message.error(healthErrorText(e) || "一直运行开启失败");
+    return;
+  }
   if (status.value.running) {
     message.success("一直运行已开启，本轮结束后自动开始下一轮");
     return;
@@ -820,7 +871,10 @@ async function startKeepRunning() {
   continuousBusy.value = true;
   try {
     const ok = await start({ continuous: true });
-    if (!ok) keepRunning.value = false;
+    if (!ok && keepRunning.value) {
+      continuousStartFailures += 1;
+      scheduleContinuousRestart();
+    }
   } finally {
     continuousBusy.value = false;
   }
@@ -829,8 +883,13 @@ async function startKeepRunning() {
 async function stopKeepRunning() {
   keepRunning.value = false;
   clearContinuousRestart();
+  clearStreamReconnect();
+  continuousStartFailures = 0;
   continuousBusy.value = true;
   try {
+    try {
+      await api.post("/run/continuous", { ...form.value, enabled: false });
+    } catch {}
     if (status.value.running) {
       await stop({ continuous: true });
     } else {
@@ -882,12 +941,18 @@ function openStream() {
     otpDialog.value.open = false;
     await refreshStatus();
     await refreshInventory();
-    scheduleContinuousRestart();
+    if (keepRunning.value && status.value.continuous_enabled) {
+      scheduleStreamReconnect();
+    } else {
+      scheduleContinuousRestart();
+    }
   });
   eventSource.onerror = () => {
-    // 连接断开，不自动 retry
     eventSource?.close();
     eventSource = null;
+    if (keepRunning.value) {
+      scheduleStreamReconnect();
+    }
   };
 }
 
@@ -925,6 +990,8 @@ watch(
     if (keepRunning.value && !canKeepRunning.value) {
       keepRunning.value = false;
       clearContinuousRestart();
+      clearStreamReconnect();
+      void api.post("/run/continuous", { ...form.value, enabled: false }).catch(() => {});
     }
     configHealth.value = null;
     refreshPreview();
@@ -966,6 +1033,7 @@ onBeforeUnmount(() => {
   if (statusTimer) clearInterval(statusTimer);
   if (inventoryTimer) clearInterval(inventoryTimer);
   clearContinuousRestart();
+  clearStreamReconnect();
   if (eventSource) eventSource.close();
 });
 </script>

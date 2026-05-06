@@ -212,6 +212,88 @@ def test_step_runner_tap_source_text_prefix_matches_clickable_multiline_row(tmp_
     assert driver.gestures == [("mobile: clickGesture", {"x": 540, "y": 873})]
 
 
+def test_step_runner_tap_source_text_waits_for_slow_page_source(tmp_path):
+    class By:
+        ID = "id"
+        XPATH = "xpath"
+        ACCESSIBILITY_ID = "accessibility_id"
+        ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+    class Driver:
+        def __init__(self):
+            self.source_reads = 0
+            self.gestures = []
+
+        @property
+        def page_source(self):
+            self.source_reads += 1
+            if self.source_reads < 2:
+                return "<hierarchy></hierarchy>"
+            return '<hierarchy><node content-desc="Linked apps" clickable="true" bounds="[48,620][1032,760]" /></hierarchy>'
+
+        def get_window_size(self):
+            return {"width": 1080, "height": 2400}
+
+        def execute_script(self, script, payload):
+            self.gestures.append((script, payload))
+
+    driver = Driver()
+    runner = android_gopay.StepRunner(driver, By, log=lambda _msg: None)
+
+    runner.run(
+        [{
+            "action": "tap_source_text",
+            "text": "Linked apps",
+            "clickable_only": True,
+            "row_center_x": True,
+            "timeout_s": 1,
+        }],
+        out_dir=tmp_path,
+    )
+
+    assert driver.gestures == [("mobile: clickGesture", {"x": 540, "y": 690})]
+
+
+def test_step_runner_state_detection_waits_before_default(tmp_path):
+    class By:
+        ID = "id"
+        XPATH = "xpath"
+        ACCESSIBILITY_ID = "accessibility_id"
+        ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+    class Driver:
+        def __init__(self):
+            self.source_reads = 0
+            self.back_calls = 0
+
+        @property
+        def page_source(self):
+            self.source_reads += 1
+            if self.source_reads < 2:
+                return "<hierarchy></hierarchy>"
+            return '<hierarchy><node text="No apps linked to your GoPay" /></hierarchy>'
+
+        def back(self):
+            self.back_calls += 1
+
+    driver = Driver()
+    runner = android_gopay.StepRunner(driver, By, log=lambda _msg: None)
+
+    result = runner.run_states(
+        [
+            {"name": "done", "match_any": ["No apps linked to your GoPay"], "terminal": True},
+            {"name": "unknown_back", "default": True, "steps": [{"action": "back"}]},
+        ],
+        out_dir=tmp_path,
+        max_iterations=1,
+        settle_s=0,
+        detect_timeout_s=1,
+    )
+
+    assert result["terminal_state"] == "done"
+    assert driver.back_calls == 0
+
+
 def test_step_runner_tap_row_skips_appium_when_text_absent_from_source(tmp_path):
     class By:
         ID = "id"

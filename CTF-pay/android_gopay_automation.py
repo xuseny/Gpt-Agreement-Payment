@@ -839,9 +839,16 @@ class StepRunner:
         values = self._text_values(step, "text")
         if not values:
             raise AndroidAutomationError(f"tap_source_text requires text/text_any: {step!r}")
-        candidates = self._source_text_candidates(values, step)
-        if not candidates:
-            raise AndroidAutomationError(f"source text not found for tap_source_text: {values}")
+        timeout = float(step.get("timeout_s", 20))
+        deadline = time.time() + timeout
+        candidates: list[tuple[float, float, dict]] = []
+        while True:
+            candidates = self._source_text_candidates(values, step)
+            if candidates:
+                break
+            if time.time() >= deadline:
+                raise AndroidAutomationError(f"source text not found for tap_source_text: {values}")
+            time.sleep(0.4)
         index = int(step.get("candidate_index") or 0)
         if index < 0:
             index = len(candidates) + index
@@ -951,7 +958,7 @@ class StepRunner:
             return False
         return bool(any_values or all_values)
 
-    def _detect_state(self, states: list[dict]) -> dict | None:
+    def _detect_state_once(self, states: list[dict]) -> dict | None:
         source = self.driver.page_source or ""
         default_state = None
         for state in states:
@@ -963,6 +970,19 @@ class StepRunner:
             if self._state_matches(state, source):
                 return state
         return default_state
+
+    def _detect_state(self, states: list[dict], timeout_s: float = 0.0) -> dict | None:
+        deadline = time.time() + max(0.0, timeout_s)
+        default_state = None
+        while True:
+            state = self._detect_state_once(states)
+            if state and not state.get("default"):
+                return state
+            if state:
+                default_state = state
+            if time.time() >= deadline:
+                return default_state
+            time.sleep(0.4)
 
     def _dump(self, out_dir: Path, name: str) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1041,13 +1061,14 @@ class StepRunner:
         out_dir: Path,
         max_iterations: int = 30,
         settle_s: float = 0.6,
+        detect_timeout_s: float = 0.0,
     ) -> dict:
         if not isinstance(states, list) or not states:
             raise AndroidAutomationError("state flow requires a non-empty states list")
         history: list[str] = []
         visits: dict[str, int] = {}
         for iteration in range(1, max(1, int(max_iterations)) + 1):
-            state = self._detect_state(states)
+            state = self._detect_state(states, timeout_s=detect_timeout_s)
             if not state:
                 self._dump(out_dir, f"unknown_{iteration:02d}")
                 raise AndroidAutomationError("unable to classify current GoPay page")
@@ -1062,7 +1083,12 @@ class StepRunner:
                 steps = state.get("terminal_steps") or state.get("exit_steps") or state.get("steps") or state.get("actions") or []
                 if isinstance(steps, list) and steps:
                     self._log(f"terminal_state={name} cleanup_steps={len(steps)}")
-                    self.run(steps, out_dir=out_dir)
+                    try:
+                        self.run(steps, out_dir=out_dir)
+                    except Exception as exc:
+                        if state.get("terminal_cleanup_required", False):
+                            raise
+                        self._log(f"terminal_state={name} cleanup skipped after error: {exc}")
                     delay_s = float(state.get("settle_s") or settle_s)
                     if delay_s > 0:
                         time.sleep(delay_s)
@@ -1174,6 +1200,7 @@ def cmd_unlink(args: argparse.Namespace) -> int:
                 out_dir=Path(args.out),
                 max_iterations=int(unlink_cfg.get("state_max_iterations") or 30),
                 settle_s=float(unlink_cfg.get("state_settle_s") or 0.6),
+                detect_timeout_s=float(unlink_cfg.get("state_detect_timeout_s") or 5.0),
             )
             print(json.dumps({"ok": True, "states": result}, ensure_ascii=False))
         else:

@@ -28,6 +28,11 @@ class StartRequest(BaseModel):
     pay_only: bool = False
     gopay: bool = False
     count: int = 0  # free_register 模式下注册次数（0 = 无限）
+    continuous: bool = False
+
+
+class ContinuousRequest(StartRequest):
+    enabled: bool = True
 
 
 class OTPRequest(BaseModel):
@@ -63,6 +68,29 @@ def start(req: StartRequest, user: str = CurrentUser):
 @router.post("/stop")
 def stop(user: str = CurrentUser):
     return runner.stop()
+
+
+@router.post("/continuous")
+def continuous(req: ContinuousRequest, user: str = CurrentUser):
+    data = req.model_dump()
+    enabled = bool(data.pop("enabled", True))
+    data.pop("continuous", None)
+    if enabled:
+        if req.mode != "single":
+            raise HTTPException(status_code=400, detail="continuous run only supports single mode")
+        health = build_config_health(data)
+        if not health.get("ok"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": health_error_message(health) or "配置健康检查未通过",
+                    "health": health,
+                },
+            )
+    try:
+        return runner.set_continuous(enabled, **data)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.post("/otp")

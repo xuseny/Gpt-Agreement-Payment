@@ -670,6 +670,51 @@ class DatadomeSliderError(PaymentError):
     pass
 
 
+def _is_transient_payment_network_error(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "proxyerror",
+            "connect tunnel failed",
+            "curl: (56)",
+            "curl: (7)",
+            "curl: (28)",
+            "curl: (35)",
+            "connection reset",
+            "connection refused",
+            "remote disconnected",
+            "read timed out",
+            "timeout was reached",
+            "temporary failure in name resolution",
+            "name resolution",
+            "network is unreachable",
+            "502 bad gateway",
+            "response 502",
+            "503 service unavailable",
+            "504 gateway timeout",
+        )
+    )
+
+
+def _payment_retry_cfg(cfg: dict) -> tuple[int, float]:
+    retry_cfg = {}
+    for key in ("payment_retry", "network_retry"):
+        value = (cfg or {}).get(key)
+        if isinstance(value, dict):
+            retry_cfg = value
+            break
+    try:
+        max_attempts = int(retry_cfg.get("max_attempts") or retry_cfg.get("attempts") or 3)
+    except Exception:
+        max_attempts = 3
+    try:
+        sleep_s = float(retry_cfg.get("sleep_s") or retry_cfg.get("base_sleep_s") or 5)
+    except Exception:
+        sleep_s = 5.0
+    return max(1, max_attempts), max(0.0, sleep_s)
+
+
 def _codex_oauth_client_id_from_card_cfg(cfg: dict) -> str:
     """Resolve Codex OAuth client_id for child card.py processes.
 
@@ -800,40 +845,62 @@ def pay(card_config_path, session_token=None, access_token=None,
 
     print(f"[pay] 启动支付 (mode={mode_label}) ...")
 
-    result_json = None
-    datadome_slider = False
+    max_attempts, retry_sleep_s = _payment_retry_cfg(cfg_for_env)
+    proc = None
     try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, env=env,
-        )
-        deadline = time.time() + timeout
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            print(f"  [pay] {line}")
-            if line.startswith(result_marker):
-                payload = line.split("=", 1)[1]
-                result_json = json.loads(payload)
-            if "CARD_DATADOME_SLIDER=1" in line:
-                datadome_slider = True
-            if time.time() > deadline:
-                proc.kill()
-                raise PaymentError("支付超时")
-        proc.wait()
+        for attempt in range(1, max_attempts + 1):
+            result_json = None
+            datadome_slider = False
+            tail_lines: list[str] = []
+            if attempt > 1:
+                print(f"[pay] transient network/proxy retry attempt {attempt}/{max_attempts} ...")
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, env=env,
+            )
+            deadline = time.time() + timeout
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                tail_lines.append(line)
+                if len(tail_lines) > 120:
+                    tail_lines = tail_lines[-120:]
+                print(f"  [pay] {line}")
+                if line.startswith(result_marker):
+                    payload = line.split("=", 1)[1]
+                    result_json = json.loads(payload)
+                if "CARD_DATADOME_SLIDER=1" in line:
+                    datadome_slider = True
+                if time.time() > deadline:
+                    proc.kill()
+                    proc.wait()
+                    raise PaymentError("支付超时")
+            proc.wait()
+
+            if datadome_slider and (not result_json or result_json.get("state") != "succeeded"):
+                raise DatadomeSliderError("PayPal 页面被 DataDome 可见滑块拦截")
+
+            if result_json:
+                status = result_json.get("state", "unknown")
+                print(f"[pay] 结果: state={status}")
+                return {"status": status, "raw": result_json}
+
+            if proc.returncode != 0:
+                tail_text = "\n".join(tail_lines)
+                if attempt < max_attempts and _is_transient_payment_network_error(tail_text):
+                    sleep_s = min(60.0, retry_sleep_s * (2 ** min(attempt - 1, 4)))
+                    print(
+                        f"[pay] transient network/proxy error detected; "
+                        f"retry in {sleep_s:.1f}s ({attempt}/{max_attempts})"
+                    )
+                    time.sleep(sleep_s)
+                    continue
+                raise PaymentError(f"支付失败 (exit={proc.returncode})")
+
+            return {"status": "unknown", "raw": None}
     finally:
         if tmp_config and os.path.exists(tmp_config.name):
             os.unlink(tmp_config.name)
-
-    if datadome_slider and (not result_json or result_json.get("state") != "succeeded"):
-        raise DatadomeSliderError("PayPal 页面被 DataDome 可见滑块拦截")
-
-    if result_json:
-        status = result_json.get("state", "unknown")
-        print(f"[pay] 结果: state={status}")
-        return {"status": status, "raw": result_json}
-
-    if proc.returncode != 0:
-        raise PaymentError(f"支付失败 (exit={proc.returncode})")
 
     return {"status": "unknown", "raw": None}
 

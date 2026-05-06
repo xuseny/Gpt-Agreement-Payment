@@ -49,6 +49,40 @@ def build_charger(otp_value: str = "123456", pin: str = "654321") -> gopay.GoPay
     return gopay.GoPayCharger(cs_session, cfg, otp_provider=lambda: otp_value, log=lambda _m: None)
 
 
+def test_retrying_session_recovers_proxy_error(monkeypatch):
+    class Response:
+        status_code = 200
+        text = "ok"
+
+    class Session:
+        headers = {}
+        proxies = {}
+
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, _method, _url, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise requests.exceptions.ProxyError("CONNECT tunnel failed, response 502")
+            return Response()
+
+    monkeypatch.setattr(gopay.time, "sleep", lambda _seconds: None)
+    logs = []
+    sess = Session()
+    wrapped = gopay._RetryingSession(
+        sess,
+        label="test",
+        retry_limit=1,
+        base_sleep_s=0,
+        log=logs.append,
+    )
+
+    assert wrapped.get("https://example.test").status_code == 200
+    assert sess.calls == 2
+    assert any("transient network/proxy error" in line for line in logs)
+
+
 # ────────────────── full happy path ──────────────────
 
 

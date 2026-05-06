@@ -176,6 +176,54 @@ def test_run_start_then_409(client, monkeypatch):
     runner_mod._proc = None
 
 
+def test_run_start_continuous_sets_backend_state(client, monkeypatch):
+    _login(client)
+    import webui.backend.runner as runner_mod
+    import webui.backend.routes.run as run_route
+
+    class FakeProc:
+        def __init__(self):
+            self.pid = 23456
+            self.stdout = None
+            self.returncode = None
+            self._terminated = False
+
+        def poll(self):
+            return None if not self._terminated else 0
+
+        def wait(self, timeout=None):
+            self._terminated = True
+            self.returncode = 0
+
+        def terminate(self):
+            self._terminated = True
+            self.returncode = 0
+
+        def kill(self):
+            self._terminated = True
+            self.returncode = -9
+
+    monkeypatch.setattr(runner_mod, "_drain", lambda proc: None)
+    monkeypatch.setattr(runner_mod.subprocess, "Popen", lambda *args, **kwargs: FakeProc())
+    monkeypatch.setattr(
+        run_route,
+        "build_config_health",
+        lambda req: {"ok": True, "blocking": [], "checks": []},
+    )
+
+    r = client.post("/api/run/start", json={"mode": "single", "continuous": True})
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["running"] is True
+    assert body["continuous_enabled"] is True
+
+    r = client.post("/api/run/stop")
+    assert r.status_code == 200
+    assert r.json()["continuous_enabled"] is False
+    runner_mod._proc = None
+
+
 def test_gopay_auto_otp_skips_manual_fifo(tmp_path, monkeypatch):
     import json
     import webui.backend.runner as runner_mod

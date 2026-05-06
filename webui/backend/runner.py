@@ -35,6 +35,19 @@ _otp_file: Optional[Path] = None       # legacy file provider path, if used
 _otp_to_db: bool = False               # True when gopay.py waits on WebUI SQLite OTP endpoint
 _otp_pending: bool = False             # set when gopay.py asks/waits for OTP
 _otp_file_is_temp: bool = False
+_continuous_enabled: bool = False
+_continuous_params: Optional[dict] = None
+_continuous_restart_attempt: int = 0
+_continuous_restart_at: Optional[float] = None
+_continuous_last_error: str = ""
+_continuous_worker: Optional[threading.Thread] = None
+
+
+def _continuous_delay_s(exit_code: Optional[int]) -> float:
+    if exit_code == 0:
+        return 1.2
+    attempt = max(1, _continuous_restart_attempt)
+    return min(60.0, 5.0 * (2 ** min(attempt - 1, 4)))
 
 
 def _gopay_auto_otp_enabled() -> bool:
@@ -121,17 +134,47 @@ def status() -> dict:
         "pid": _proc.pid if is_running and _proc else None,
         "log_count": _seq_counter,
         "otp_pending": _otp_pending,
+        "continuous_enabled": _continuous_enabled,
+        "continuous_restart_at": _continuous_restart_at,
+        "continuous_restart_attempt": _continuous_restart_attempt,
+        "continuous_last_error": _continuous_last_error,
     }
 
 
 def start(*, mode: str, paypal: bool = True, batch: int = 0, workers: int = 3,
           self_dealer: int = 0, register_only: bool = False, pay_only: bool = False,
-          gopay: bool = False, count: int = 0) -> dict:
+          gopay: bool = False, count: int = 0, continuous: bool = False) -> dict:
     global _proc, _started_at, _ended_at, _exit_code, _cmd, _mode
     global _log_lines, _seq_counter, _otp_file, _otp_to_db, _otp_pending, _otp_file_is_temp
+    global _continuous_enabled, _continuous_params, _continuous_restart_attempt
+    global _continuous_restart_at, _continuous_last_error
     with _lock:
         if _proc is not None and _proc.poll() is None:
             raise RuntimeError("a pipeline is already running")
+        if continuous and mode != "single":
+            raise RuntimeError("continuous run only supports single mode")
+        if continuous:
+            _continuous_enabled = True
+            _continuous_params = {
+                "mode": mode,
+                "paypal": paypal,
+                "batch": batch,
+                "workers": workers,
+                "self_dealer": self_dealer,
+                "register_only": register_only,
+                "pay_only": pay_only,
+                "gopay": gopay,
+                "count": count,
+            }
+            _continuous_restart_attempt = 0
+            _continuous_restart_at = None
+            _continuous_last_error = ""
+        else:
+            _continuous_enabled = False
+            _continuous_params = None
+            _continuous_restart_attempt = 0
+            _continuous_restart_at = None
+            _continuous_last_error = ""
 
         # OTP 默认走 WebUI SQLite endpoint；不再创建临时 FIFO 文件。
         otp_p: Optional[Path] = None
@@ -180,6 +223,101 @@ def start(*, mode: str, paypal: bool = True, batch: int = 0, workers: int = 3,
     return status()
 
 
+def set_continuous(enabled: bool, **params) -> dict:
+    global _continuous_enabled, _continuous_params, _continuous_restart_attempt
+    global _continuous_restart_at, _continuous_last_error
+    mode = str(params.get("mode") or "single")
+    with _lock:
+        if enabled:
+            if mode != "single":
+                raise RuntimeError("continuous run only supports single mode")
+            _continuous_enabled = True
+            _continuous_params = {
+                "mode": mode,
+                "paypal": bool(params.get("paypal", True)),
+                "batch": int(params.get("batch") or 0),
+                "workers": int(params.get("workers") or 3),
+                "self_dealer": int(params.get("self_dealer") or 0),
+                "register_only": bool(params.get("register_only", False)),
+                "pay_only": bool(params.get("pay_only", False)),
+                "gopay": bool(params.get("gopay", False)),
+                "count": int(params.get("count") or 0),
+            }
+            _continuous_last_error = ""
+        else:
+            _continuous_enabled = False
+            _continuous_params = None
+            _continuous_restart_at = None
+            _continuous_last_error = ""
+        _continuous_restart_attempt = 0
+    return status()
+
+
+def _ensure_continuous_worker() -> None:
+    global _continuous_worker
+    with _lock:
+        if _continuous_worker is not None and _continuous_worker.is_alive():
+            return
+        _continuous_worker = threading.Thread(target=_continuous_restart_loop, daemon=True)
+        _continuous_worker.start()
+
+
+def _continuous_restart_loop() -> None:
+    global _continuous_worker, _continuous_restart_attempt, _continuous_restart_at
+    global _continuous_last_error
+    try:
+        while True:
+            with _lock:
+                if not _continuous_enabled or not _continuous_params:
+                    _continuous_worker = None
+                    return
+                if _proc is not None and _proc.poll() is None:
+                    _continuous_restart_at = None
+                    _continuous_worker = None
+                    return
+                restart_at = _continuous_restart_at or time.time()
+            sleep_s = max(0.0, restart_at - time.time())
+            if sleep_s:
+                time.sleep(sleep_s)
+            with _lock:
+                if not _continuous_enabled or not _continuous_params:
+                    _continuous_worker = None
+                    return
+                if _proc is not None and _proc.poll() is None:
+                    _continuous_restart_at = None
+                    _continuous_worker = None
+                    return
+                params = dict(_continuous_params)
+            try:
+                start(**params, continuous=True)
+                with _lock:
+                    _continuous_restart_at = None
+                    _continuous_last_error = ""
+                    _continuous_worker = None
+                return
+            except RuntimeError as exc:
+                if "already running" in str(exc):
+                    with _lock:
+                        _continuous_restart_at = None
+                        _continuous_worker = None
+                    return
+                with _lock:
+                    _continuous_restart_attempt += 1
+                    delay_s = _continuous_delay_s(_exit_code)
+                    _continuous_restart_at = time.time() + delay_s
+                    _continuous_last_error = str(exc)[:200]
+            except Exception as exc:
+                with _lock:
+                    _continuous_restart_attempt += 1
+                    delay_s = _continuous_delay_s(_exit_code)
+                    _continuous_restart_at = time.time() + delay_s
+                    _continuous_last_error = str(exc)[:200]
+    finally:
+        with _lock:
+            if _continuous_worker is threading.current_thread():
+                _continuous_worker = None
+
+
 def _detect_otp_wait_target(line: str) -> tuple[str, Optional[Path]]:
     """Return (kind, path) from GoPay OTP wait markers."""
     if "GOPAY_OTP_REQUEST" in line:
@@ -217,6 +355,7 @@ def _line_clears_otp_pending(line: str) -> bool:
 
 def _drain(proc: subprocess.Popen) -> None:
     global _ended_at, _exit_code, _seq_counter, _log_lines, _otp_pending, _otp_file, _otp_to_db, _otp_file_is_temp
+    global _continuous_restart_attempt, _continuous_restart_at
     try:
         if proc.stdout is None:
             return
@@ -255,11 +394,27 @@ def _drain(proc: subprocess.Popen) -> None:
                     _otp_file.unlink(missing_ok=True)
                 except Exception:
                     pass
+            should_restart = bool(_continuous_enabled and _continuous_params and _proc is proc)
+            if should_restart:
+                if proc.returncode == 0:
+                    _continuous_restart_attempt = 0
+                else:
+                    _continuous_restart_attempt += 1
+                _continuous_restart_at = time.time() + _continuous_delay_s(proc.returncode)
+        if should_restart:
+            _ensure_continuous_worker()
 
 
 def stop() -> dict:
     global _proc
+    global _continuous_enabled, _continuous_params, _continuous_restart_at
+    global _continuous_restart_attempt, _continuous_last_error
     with _lock:
+        _continuous_enabled = False
+        _continuous_params = None
+        _continuous_restart_at = None
+        _continuous_restart_attempt = 0
+        _continuous_last_error = ""
         proc = _proc
         if proc is None or proc.poll() is not None:
             return status()

@@ -64,6 +64,102 @@ def _new_session(impersonate: str = "chrome136") -> Any:
     return requests.Session()
 
 
+def _is_transient_network_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "proxyerror",
+            "connect tunnel failed",
+            "curl: (56)",
+            "curl: (7)",
+            "curl: (28)",
+            "curl: (35)",
+            "connection reset",
+            "connection refused",
+            "remote disconnected",
+            "read timed out",
+            "timeout was reached",
+            "temporary failure in name resolution",
+            "name resolution",
+            "network is unreachable",
+            "502 bad gateway",
+            "response 502",
+            "503 service unavailable",
+            "504 gateway timeout",
+        )
+    )
+
+
+def _is_retryable_http_status(status_code: int) -> bool:
+    return int(status_code or 0) in {502, 503, 504, 520, 521, 522, 523, 524}
+
+
+class _RetryingSession:
+    def __init__(
+        self,
+        session: Any,
+        *,
+        label: str,
+        retry_limit: int,
+        base_sleep_s: float,
+        log: Callable[[str], None],
+    ):
+        object.__setattr__(self, "_session", session)
+        object.__setattr__(self, "_label", label)
+        object.__setattr__(self, "_retry_limit", max(0, int(retry_limit)))
+        object.__setattr__(self, "_base_sleep_s", max(0.0, float(base_sleep_s)))
+        object.__setattr__(self, "_log", log)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._session, name, value)
+
+    def _sleep_s(self, attempt: int) -> float:
+        base = self._base_sleep_s or 1.0
+        return min(30.0, base * (2 ** min(max(0, attempt - 1), 4)))
+
+    def request(self, method: str, url: str, **kwargs: Any) -> Any:
+        attempts = self._retry_limit + 1
+        method_upper = str(method or "").upper()
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self._session.request(method, url, **kwargs)
+            except Exception as exc:
+                if attempt >= attempts or not _is_transient_network_error(exc):
+                    raise
+                sleep_s = self._sleep_s(attempt)
+                self._log(
+                    f"[gopay] transient network/proxy error "
+                    f"{self._label}.{method_upper} attempt={attempt}/{attempts}: {exc}; "
+                    f"retry in {sleep_s:.1f}s"
+                )
+                time.sleep(sleep_s)
+                continue
+            if attempt < attempts and _is_retryable_http_status(getattr(response, "status_code", 0)):
+                sleep_s = self._sleep_s(attempt)
+                self._log(
+                    f"[gopay] transient http status "
+                    f"{self._label}.{method_upper} status={response.status_code} "
+                    f"attempt={attempt}/{attempts}; retry in {sleep_s:.1f}s"
+                )
+                time.sleep(sleep_s)
+                continue
+            return response
+        raise GoPayError(f"{self._label}.{method_upper} exhausted retries: {url}")
+
+    def get(self, url: str, **kwargs: Any) -> Any:
+        return self.request("GET", url, **kwargs)
+
+    def post(self, url: str, **kwargs: Any) -> Any:
+        return self.request("POST", url, **kwargs)
+
+
 def _is_tls_transport_error(exc: BaseException) -> bool:
     text = str(exc).lower()
     return (
@@ -156,6 +252,8 @@ LINK_RATE_LIMIT_MAX_SLEEP_S = 5.0
 DEFAULT_OTP_VALIDATE_RETRY_LIMIT = 2
 DEFAULT_OTP_VALIDATE_RETRY_SLEEP_S = 1.0
 DEFAULT_OTP_REGEX = r"(?<!\d)(\d{6})(?!\d)"
+DEFAULT_NETWORK_RETRY_LIMIT = 2
+DEFAULT_NETWORK_RETRY_SLEEP_S = 2.0
 
 
 # ──────────────────────────── exceptions ──────────────────────────
@@ -242,13 +340,42 @@ class GoPayCharger:
             self.otp_validate_retry_sleep_s = max(0.0, float(retry_sleep_raw))
         except (TypeError, ValueError):
             self.otp_validate_retry_sleep_s = DEFAULT_OTP_VALIDATE_RETRY_SLEEP_S
+        network_retry_limit_raw = gopay_cfg.get("network_retry_limit", DEFAULT_NETWORK_RETRY_LIMIT)
+        network_retry_sleep_raw = gopay_cfg.get("network_retry_sleep_s", DEFAULT_NETWORK_RETRY_SLEEP_S)
+        try:
+            self.network_retry_limit = max(0, int(network_retry_limit_raw))
+        except (TypeError, ValueError):
+            self.network_retry_limit = DEFAULT_NETWORK_RETRY_LIMIT
+        try:
+            self.network_retry_sleep_s = max(0.0, float(network_retry_sleep_raw))
+        except (TypeError, ValueError):
+            self.network_retry_sleep_s = DEFAULT_NETWORK_RETRY_SLEEP_S
         # Stripe runtime fingerprint (js_checksum / rv_timestamp / version) — these
         # are computed by Stripe.js client-side; replay the captured values from
         # config.runtime or HAR. Without them confirm 400.
         self.runtime = runtime_cfg or {}
         # separate session for non-chatgpt domains (avoid leaking chatgpt cookies)
-        self.ext = _new_session()
-        self.ext_fallback = requests.Session()
+        self.cs = _RetryingSession(
+            self.cs,
+            label="chatgpt",
+            retry_limit=self.network_retry_limit,
+            base_sleep_s=self.network_retry_sleep_s,
+            log=self.log,
+        )
+        self.ext = _RetryingSession(
+            _new_session(),
+            label="external",
+            retry_limit=self.network_retry_limit,
+            base_sleep_s=self.network_retry_sleep_s,
+            log=self.log,
+        )
+        self.ext_fallback = _RetryingSession(
+            requests.Session(),
+            label="fallback",
+            retry_limit=self.network_retry_limit,
+            base_sleep_s=self.network_retry_sleep_s,
+            log=self.log,
+        )
         self.ext.headers.update({
             "User-Agent": (
                 self.cs.headers.get("User-Agent")

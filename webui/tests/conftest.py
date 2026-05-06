@@ -22,3 +22,9 @@ def _reset_runner():
     r._mode = None
     r._log_lines = []
     r._seq_counter = 0
+    r._continuous_enabled = False
+    r._continuous_params = None
+    r._continuous_restart_attempt = 0
+    r._continuous_restart_at = None
+    r._continuous_last_error = ""
+    r._continuous_worker = None

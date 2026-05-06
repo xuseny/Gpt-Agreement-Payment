@@ -144,6 +144,7 @@
       "activate_wait_s": 2,
       "state_max_iterations": 30,
       "state_settle_s": 0.7,
+      "state_detect_timeout_s": 5,
       "exit_to_home_on_complete": false,
       "states": [
         {
@@ -172,7 +173,7 @@
                 "Account & app settings",
                 "Pengaturan akun"
               ],
-              "timeout_s": 5
+              "timeout_s": 15
             }
           ]
         },
