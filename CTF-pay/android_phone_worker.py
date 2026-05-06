@@ -637,7 +637,7 @@ def run_worker(args: argparse.Namespace) -> int:
                             run_logs_url,
                             token,
                             since_seq=0,
-                            limit=unlink_log_limit,
+                            limit=run_log_limit,
                             timeout=post_timeout_s,
                         )
                     lines = log_payload.get("lines") if isinstance(log_payload.get("lines"), list) else []

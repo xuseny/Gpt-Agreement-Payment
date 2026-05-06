@@ -180,9 +180,49 @@
           ],
           "steps": [
             {
-              "action": "tap",
+              "action": "tap_source_text",
               "text": "Unlink",
+              "min_y_ratio": 0.12,
               "timeout_s": 6
+            }
+          ]
+        },
+        {
+          "name": "linked_apps",
+          "match_all": [
+            "Linked apps",
+            "Unlink"
+          ],
+          "steps": [
+            {
+              "action": "tap_source_text",
+              "text": "Unlink",
+              "min_y_ratio": 0.12,
+              "timeout_s": 8
+            }
+          ]
+        },
+        {
+          "name": "linked_apps_open_detail",
+          "match_any": [
+            "Linked apps",
+            "Aplikasi tertaut"
+          ],
+          "match_none": [
+            "Unlink",
+            "No apps linked to your GoPay"
+          ],
+          "steps": [
+            {
+              "action": "tap_source_text",
+              "text_any": [
+                "Linked apps",
+                "Aplikasi tertaut"
+              ],
+              "exclude_heading": true,
+              "min_y_ratio": 0.18,
+              "row_center_x": true,
+              "timeout_s": 8
             }
           ]
         },
@@ -191,27 +231,17 @@
           "match_any": [
             "Unlink"
           ],
-          "steps": [
-            {
-              "action": "tap",
-              "text": "Unlink",
-              "timeout_s": 8
-            }
-          ]
-        },
-        {
-          "name": "linked_apps",
-          "match_any": [
+          "match_none": [
             "Linked apps",
-            "Aplikasi tertaut"
+            "Aplikasi tertaut",
+            "Popular service permission",
+            "No permission setting recorded"
           ],
           "steps": [
             {
-              "action": "tap_row",
-              "text_any": [
-                "Linked apps",
-                "Aplikasi tertaut"
-              ],
+              "action": "tap_source_text",
+              "text": "Unlink",
+              "min_y_ratio": 0.12,
               "timeout_s": 8
             }
           ]
@@ -238,11 +268,14 @@
           ],
           "steps": [
             {
-              "action": "tap_row",
+              "action": "tap_source_text",
               "text_any": [
                 "Linked apps",
                 "Aplikasi tertaut"
               ],
+              "exclude_heading": true,
+              "min_y_ratio": 0.18,
+              "row_center_x": true,
               "timeout_s": 8
             }
           ]
@@ -255,11 +288,14 @@
           ],
           "steps": [
             {
-              "action": "tap_row",
+              "action": "tap_source_text",
               "text_any": [
                 "Linked apps",
                 "Aplikasi tertaut"
               ],
+              "exclude_heading": true,
+              "min_y_ratio": 0.18,
+              "row_center_x": true,
               "timeout_s": 8
             }
           ]
@@ -272,11 +308,14 @@
           ],
           "steps": [
             {
-              "action": "tap_row",
+              "action": "tap_source_text",
               "text_any": [
                 "Account & app settings",
                 "Pengaturan akun"
               ],
+              "exclude_heading": true,
+              "min_y_ratio": 0.12,
+              "row_center_x": true,
               "timeout_s": 5
             }
           ]

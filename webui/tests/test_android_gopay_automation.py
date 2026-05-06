@@ -92,17 +92,23 @@ def test_config_example_unlink_targets_linked_apps_from_profile_settings():
     }
 
     profile_tab_step = states["profile_tab"]["steps"][0]
-    assert profile_tab_step["action"] == "tap_row"
+    assert profile_tab_step["action"] == "tap_source_text"
     assert "Account & app settings" in profile_tab_step["text_any"]
+    assert profile_tab_step["exclude_heading"] is True
     assert profile_tab_step.get("text_contains") is None
 
     profile_settings = states["profile_settings"]
     assert profile_settings["match_all"] == ["Account & app settings", "Linked apps"]
     profile_settings_step = profile_settings["steps"][0]
-    assert profile_settings_step["action"] == "tap_row"
+    assert profile_settings_step["action"] == "tap_source_text"
     assert "Linked apps" in profile_settings_step["text_any"]
+    assert profile_settings_step["exclude_heading"] is True
+    assert profile_settings_step["row_center_x"] is True
     assert profile_settings_step.get("text_contains") is None
     assert states["profile_settings_id"]["match_all"] == ["Pengaturan akun", "Aplikasi tertaut"]
+    assert states["linked_apps"]["match_all"] == ["Linked apps", "Unlink"]
+    assert states["linked_apps"]["steps"][0]["action"] == "tap_source_text"
+    assert "Linked apps" in states["linked_app_detail"]["match_none"]
     assert states["popular_service_permission"]["steps"][0]["action"] == "back"
     assert cfg["android_automation"]["gopay_unlink"]["exit_to_home_on_complete"] is True
 

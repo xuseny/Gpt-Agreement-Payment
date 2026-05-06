@@ -112,6 +112,54 @@ def test_step_runner_tap_row_uses_exact_linked_apps_row(tmp_path):
     assert not any('textContains("Linked apps")' in selector for _, selector in driver.selectors)
 
 
+def test_step_runner_tap_source_text_uses_lower_non_heading_row(tmp_path):
+    class By:
+        ID = "id"
+        XPATH = "xpath"
+        ACCESSIBILITY_ID = "accessibility_id"
+        ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+    class Driver:
+        page_source = """
+        <hierarchy>
+          <node content-desc="Linked apps" heading="true" bounds="[168,168][484,240]" />
+          <node content-desc="Linked apps" heading="false" bounds="[48,620][1032,760]" />
+        </hierarchy>
+        """
+
+        def __init__(self):
+            self.find_calls = 0
+            self.gestures = []
+
+        def get_window_size(self):
+            return {"width": 1080, "height": 2400}
+
+        def find_element(self, *_args):
+            self.find_calls += 1
+            raise RuntimeError("source tap should not use Appium find")
+
+        def execute_script(self, script, payload):
+            self.gestures.append((script, payload))
+
+    driver = Driver()
+    runner = android_gopay.StepRunner(driver, By, log=lambda _msg: None)
+
+    runner.run(
+        [{
+            "action": "tap_source_text",
+            "text": "Linked apps",
+            "exclude_heading": True,
+            "min_y_ratio": 0.18,
+            "row_center_x": True,
+            "timeout_s": 0.01,
+        }],
+        out_dir=tmp_path,
+    )
+
+    assert driver.find_calls == 0
+    assert driver.gestures == [("mobile: clickGesture", {"x": 540, "y": 690})]
+
+
 def test_step_runner_tap_row_skips_appium_when_text_absent_from_source(tmp_path):
     class By:
         ID = "id"

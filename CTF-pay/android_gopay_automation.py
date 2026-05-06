@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
@@ -614,6 +615,105 @@ class StepRunner:
         source_values = self._source_values()
         return any(v and any(v in item for item in source_values) for v in values)
 
+    def _window_size(self) -> dict:
+        try:
+            return dict(self.driver.get_window_size() or {})
+        except Exception:
+            return {}
+
+    def _tap_xy(self, x: float, y: float) -> None:
+        try:
+            self.driver.execute_script("mobile: clickGesture", {"x": int(x), "y": int(y)})
+            return
+        except Exception:
+            pass
+        try:
+            self.driver.tap([(int(x), int(y))])
+            return
+        except Exception:
+            pass
+        raise AndroidAutomationError(f"tap failed at x={int(x)} y={int(y)}")
+
+    def _bounds_center(self, bounds: str) -> tuple[float, float] | None:
+        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", str(bounds or ""))
+        if not m:
+            return None
+        x1, y1, x2, y2 = [float(part) for part in m.groups()]
+        return (x1 + x2) / 2, (y1 + y2) / 2
+
+    def _source_text_candidates(self, values: list[str], step: dict) -> list[tuple[float, float, dict]]:
+        exact = bool(step.get("exact", True))
+        exclude_heading = bool(step.get("exclude_heading", False))
+        min_y = float(step.get("min_y") or 0)
+        max_y = float(step.get("max_y") or 0)
+        size = self._window_size()
+        height = float(size.get("height") or 0)
+        if height:
+            min_y = max(min_y, height * float(step.get("min_y_ratio") or 0))
+            ratio_max = float(step.get("max_y_ratio") or 0)
+            if ratio_max > 0:
+                max_y = height * ratio_max
+        source, unescaped = self._source_values()
+        roots = []
+        for raw_source in (source, unescaped):
+            try:
+                roots.append(ET.fromstring(raw_source))
+            except Exception:
+                continue
+        candidates: list[tuple[float, float, dict]] = []
+        for root in roots:
+            for node in root.iter():
+                attrs = dict(getattr(node, "attrib", {}) or {})
+                if exclude_heading and str(attrs.get("heading") or "").lower() == "true":
+                    continue
+                center = self._bounds_center(str(attrs.get("bounds") or ""))
+                if not center:
+                    continue
+                x, y = center
+                if y < min_y:
+                    continue
+                if max_y > 0 and y > max_y:
+                    continue
+                text_values = [
+                    str(attrs.get("text") or ""),
+                    str(attrs.get("content-desc") or ""),
+                    str(attrs.get("pane-title") or ""),
+                ]
+                for expected in values:
+                    if not expected:
+                        continue
+                    matched = any(item == expected for item in text_values) if exact else any(
+                        expected in item for item in text_values
+                    )
+                    if matched:
+                        candidates.append((x, y, attrs))
+                        break
+            if candidates:
+                break
+        candidates.sort(key=lambda item: (item[1], item[0]))
+        return candidates
+
+    def _tap_source_text(self, step: dict) -> None:
+        values = self._text_values(step, "text")
+        if not values:
+            raise AndroidAutomationError(f"tap_source_text requires text/text_any: {step!r}")
+        candidates = self._source_text_candidates(values, step)
+        if not candidates:
+            raise AndroidAutomationError(f"source text not found for tap_source_text: {values}")
+        index = int(step.get("candidate_index") or 0)
+        if index < 0:
+            index = len(candidates) + index
+        if index < 0 or index >= len(candidates):
+            raise AndroidAutomationError(
+                f"candidate_index {step.get('candidate_index')} out of range for {values}: {len(candidates)}"
+            )
+        x, y, attrs = candidates[index]
+        if step.get("row_center_x", False):
+            size = self._window_size()
+            x = float(size.get("width") or x * 2) * float(step.get("row_x_ratio") or 0.5)
+        self._log(f"tap_source_text={values[0]} x={int(x)} y={int(y)} desc={attrs.get('content-desc') or attrs.get('text') or ''}")
+        self._tap_xy(x, y)
+
     def _tap_element_row(self, element: Any, step: dict) -> None:
         try:
             rect = dict(getattr(element, "rect", {}) or {})
@@ -625,16 +725,8 @@ class StepRunner:
                     x = float(size.get("width") or 0) * float(step.get("row_x_ratio") or 0.5)
                 except Exception:
                     pass
-            try:
-                self.driver.execute_script("mobile: clickGesture", {"x": int(x), "y": int(y)})
-                return
-            except Exception:
-                pass
-            try:
-                self.driver.tap([(int(x), int(y))])
-                return
-            except Exception:
-                pass
+            self._tap_xy(x, y)
+            return
         except Exception:
             pass
         element.click()
@@ -749,7 +841,9 @@ class StepRunner:
                 if action == "sleep":
                     time.sleep(float(step.get("seconds", 1)))
                 elif action == "tap":
-                    self._find(step).click()
+                    self._tap_element_row(self._find(step), {**step, "row_center_x": False})
+                elif action == "tap_source_text":
+                    self._tap_source_text(step)
                 elif action == "tap_row":
                     self._tap_element_row(self._find(step), step)
                 elif action == "tap_optional":
