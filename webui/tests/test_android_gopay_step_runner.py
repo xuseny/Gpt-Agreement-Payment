@@ -160,6 +160,57 @@ def test_step_runner_tap_source_text_uses_lower_non_heading_row(tmp_path):
     assert driver.gestures == [("mobile: clickGesture", {"x": 540, "y": 690})]
 
 
+def test_step_runner_tap_source_text_prefix_matches_clickable_multiline_row(tmp_path):
+    class By:
+        ID = "id"
+        XPATH = "xpath"
+        ACCESSIBILITY_ID = "accessibility_id"
+        ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+    class Driver:
+        page_source = """
+        <hierarchy>
+          <node content-desc="Account &amp; app settings" heading="true" clickable="false" bounds="[60,166][506,238]" />
+          <node content-desc="Account &amp; app settings&#10;Control your app preferences, data, linked apps and more." heading="false" clickable="true" bounds="[48,741][1032,1005]" />
+          <node content-desc="Popular service permission" heading="false" clickable="true" bounds="[48,1008][1032,1272]" />
+        </hierarchy>
+        """
+
+        def __init__(self):
+            self.find_calls = 0
+            self.gestures = []
+
+        def get_window_size(self):
+            return {"width": 1080, "height": 2400}
+
+        def find_element(self, *_args):
+            self.find_calls += 1
+            raise RuntimeError("source tap should not use Appium find")
+
+        def execute_script(self, script, payload):
+            self.gestures.append((script, payload))
+
+    driver = Driver()
+    runner = android_gopay.StepRunner(driver, By, log=lambda _msg: None)
+
+    runner.run(
+        [{
+            "action": "tap_source_text",
+            "text": "Account & app settings",
+            "match_mode": "prefix",
+            "clickable_only": True,
+            "exclude_heading": True,
+            "min_y_ratio": 0.12,
+            "row_center_x": True,
+            "timeout_s": 0.01,
+        }],
+        out_dir=tmp_path,
+    )
+
+    assert driver.find_calls == 0
+    assert driver.gestures == [("mobile: clickGesture", {"x": 540, "y": 873})]
+
+
 def test_step_runner_tap_row_skips_appium_when_text_absent_from_source(tmp_path):
     class By:
         ID = "id"

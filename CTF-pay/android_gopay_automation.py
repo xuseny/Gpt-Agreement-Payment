@@ -641,8 +641,27 @@ class StepRunner:
         x1, y1, x2, y2 = [float(part) for part in m.groups()]
         return (x1 + x2) / 2, (y1 + y2) / 2
 
+    def _source_text_matches(self, item: str, expected: str, match_mode: str) -> bool:
+        if not item or not expected:
+            return False
+        if match_mode == "exact":
+            return item == expected
+        if match_mode in {"prefix", "startswith", "starts_with"}:
+            return (
+                item == expected
+                or item.startswith(expected + "\n")
+                or item.startswith(expected + "\r")
+                or item.startswith(expected)
+            )
+        if match_mode == "contains":
+            return expected in item
+        raise AndroidAutomationError(f"unsupported tap_source_text match_mode={match_mode!r}")
+
     def _source_text_candidates(self, values: list[str], step: dict) -> list[tuple[float, float, dict]]:
-        exact = bool(step.get("exact", True))
+        match_mode = str(step.get("match_mode") or "").strip().lower()
+        if not match_mode:
+            match_mode = "exact" if bool(step.get("exact", True)) else "contains"
+        clickable_only = bool(step.get("clickable_only", False))
         exclude_heading = bool(step.get("exclude_heading", False))
         min_y = float(step.get("min_y") or 0)
         max_y = float(step.get("max_y") or 0)
@@ -666,6 +685,8 @@ class StepRunner:
                 attrs = dict(getattr(node, "attrib", {}) or {})
                 if exclude_heading and str(attrs.get("heading") or "").lower() == "true":
                     continue
+                if clickable_only and str(attrs.get("clickable") or "").lower() != "true":
+                    continue
                 center = self._bounds_center(str(attrs.get("bounds") or ""))
                 if not center:
                     continue
@@ -682,9 +703,7 @@ class StepRunner:
                 for expected in values:
                     if not expected:
                         continue
-                    matched = any(item == expected for item in text_values) if exact else any(
-                        expected in item for item in text_values
-                    )
+                    matched = any(self._source_text_matches(item, expected, match_mode) for item in text_values)
                     if matched:
                         candidates.append((x, y, attrs))
                         break

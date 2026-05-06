@@ -219,6 +219,8 @@
                 "Linked apps",
                 "Aplikasi tertaut"
               ],
+              "match_mode": "prefix",
+              "clickable_only": true,
               "exclude_heading": true,
               "min_y_ratio": 0.18,
               "row_center_x": true,
@@ -248,9 +250,12 @@
         },
         {
           "name": "popular_service_permission",
+          "match_all": [
+            "Popular service permission"
+          ],
           "match_any": [
-            "Popular service permission",
-            "No permission setting recorded"
+            "No permission setting recorded",
+            "Once you"
           ],
           "max_visits": 2,
           "dump_on_enter": true,
@@ -273,6 +278,8 @@
                 "Linked apps",
                 "Aplikasi tertaut"
               ],
+              "match_mode": "prefix",
+              "clickable_only": true,
               "exclude_heading": true,
               "min_y_ratio": 0.18,
               "row_center_x": true,
@@ -293,6 +300,8 @@
                 "Linked apps",
                 "Aplikasi tertaut"
               ],
+              "match_mode": "prefix",
+              "clickable_only": true,
               "exclude_heading": true,
               "min_y_ratio": 0.18,
               "row_center_x": true,
@@ -313,6 +322,8 @@
                 "Account & app settings",
                 "Pengaturan akun"
               ],
+              "match_mode": "prefix",
+              "clickable_only": true,
               "exclude_heading": true,
               "min_y_ratio": 0.12,
               "row_center_x": true,
