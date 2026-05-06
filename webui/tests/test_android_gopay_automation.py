@@ -93,34 +93,44 @@ def test_config_example_unlink_targets_linked_apps_from_profile_settings():
         for state in cfg["android_automation"]["gopay_unlink"]["states"]
     }
 
-    profile_tab_step = states["profile_tab"]["steps"][0]
-    assert profile_tab_step["action"] == "tap_source_text"
-    assert "Account & app settings" in profile_tab_step["text_any"]
-    assert profile_tab_step["match_mode"] == "prefix"
-    assert profile_tab_step["clickable_only"] is True
-    assert profile_tab_step["exclude_heading"] is True
-    assert profile_tab_step.get("text_contains") is None
+    home_step = states["home"]["steps"][0]
+    assert home_step["action"] == "tap_source_text"
+    assert "Profile" in home_step["text_any"]
+    assert home_step["min_y_ratio"] >= 0.78
+    assert "Account & app settings" in states["home"]["match_none"]
 
-    profile_settings = states["profile_settings"]
-    assert profile_settings["match_all"] == ["Account & app settings", "Linked apps"]
-    profile_settings_step = profile_settings["steps"][0]
-    assert profile_settings_step["action"] == "tap_source_text"
-    assert "Linked apps" in profile_settings_step["text_any"]
-    assert profile_settings_step["match_mode"] == "prefix"
-    assert profile_settings_step["clickable_only"] is True
-    assert profile_settings_step["exclude_heading"] is True
-    assert profile_settings_step["row_center_x"] is True
-    assert profile_settings_step.get("text_contains") is None
-    assert states["profile_settings_id"]["match_all"] == ["Pengaturan akun", "Aplikasi tertaut"]
+    account_safety_step = states["account_safety"]["steps"][0]
+    assert account_safety_step["action"] == "tap_source_text"
+    assert "Account & app settings" in account_safety_step["text_any"]
+    assert account_safety_step["match_mode"] == "prefix"
+    assert account_safety_step["clickable_only"] is True
+    assert account_safety_step["exclude_heading"] is True
+
+    account_app_settings = states["account_app_settings"]
+    assert account_app_settings["match_all"] == ["Account & app settings", "Linked apps"]
+    account_app_settings_step = account_app_settings["steps"][0]
+    assert account_app_settings_step["action"] == "tap_source_text"
+    assert "Linked apps" in account_app_settings_step["text_any"]
+    assert account_app_settings_step["match_mode"] == "prefix"
+    assert account_app_settings_step["clickable_only"] is True
+    assert account_app_settings_step["exclude_heading"] is True
+    assert account_app_settings_step["row_center_x"] is True
+    assert account_app_settings_step.get("text_contains") is None
+    assert states["account_app_settings_id"]["match_all"] == ["Pengaturan akun", "Aplikasi tertaut"]
     assert states["linked_apps"]["match_all"] == ["Linked apps", "Unlink"]
     assert states["linked_apps"]["steps"][0]["action"] == "tap_source_text"
+    assert states["linked_apps"]["steps"][0]["max_y_ratio"] == 0.45
+    assert "Unlink OpenAI" in states["unlink_confirm"]["match_any"]
+    assert states["unlink_confirm"]["steps"][0]["min_y_ratio"] == 0.65
     assert states["linked_apps_open_detail"]["steps"][0]["match_mode"] == "prefix"
     assert states["linked_apps_open_detail"]["steps"][0]["clickable_only"] is True
+    assert "Account & app settings" in states["linked_apps_open_detail"]["match_none"]
     assert "Linked apps" in states["linked_app_detail"]["match_none"]
     assert states["popular_service_permission"]["match_all"] == ["Popular service permission"]
     assert "No permission setting recorded" in states["popular_service_permission"]["match_any"]
     assert states["popular_service_permission"]["steps"][0]["action"] == "back"
-    assert cfg["android_automation"]["gopay_unlink"]["exit_to_home_on_complete"] is True
+    assert cfg["android_automation"]["gopay_unlink"]["exit_to_home_on_complete"] is False
+    assert states["already_unlinked"]["terminal_steps"][-1]["action"] == "wait_text_any"
 
 
 def test_driver_wraps_appium_session_failure(monkeypatch):

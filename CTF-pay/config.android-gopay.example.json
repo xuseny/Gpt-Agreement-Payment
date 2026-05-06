@@ -139,7 +139,7 @@
       "activate_wait_s": 2,
       "state_max_iterations": 30,
       "state_settle_s": 0.7,
-      "exit_to_home_on_complete": true,
+      "exit_to_home_on_complete": false,
       "states": [
         {
           "name": "already_unlinked",
@@ -162,15 +162,12 @@
               "seconds": 0.5
             },
             {
-              "action": "back"
-            },
-            {
-              "action": "sleep",
-              "seconds": 0.3
-            },
-            {
-              "action": "press_keycode",
-              "keycode": 3
+              "action": "wait_text_any",
+              "values": [
+                "Account & app settings",
+                "Pengaturan akun"
+              ],
+              "timeout_s": 5
             }
           ]
         },
@@ -182,6 +179,8 @@
           "match_any": [
             "Cancel",
             "Are you sure",
+            "Unlink OpenAI",
+            "Once unlinked",
             "disconnect",
             "konfirmasi"
           ],
@@ -189,7 +188,8 @@
             {
               "action": "tap_source_text",
               "text": "Unlink",
-              "min_y_ratio": 0.12,
+              "clickable_only": true,
+              "min_y_ratio": 0.65,
               "timeout_s": 6
             }
           ]
@@ -204,7 +204,9 @@
             {
               "action": "tap_source_text",
               "text": "Unlink",
+              "clickable_only": true,
               "min_y_ratio": 0.12,
+              "max_y_ratio": 0.45,
               "timeout_s": 8
             }
           ]
@@ -216,6 +218,8 @@
             "Aplikasi tertaut"
           ],
           "match_none": [
+            "Account & app settings",
+            "Pengaturan akun",
             "Unlink",
             "No apps linked to your GoPay"
           ],
@@ -273,7 +277,7 @@
           ]
         },
         {
-          "name": "profile_settings",
+          "name": "account_app_settings",
           "match_all": [
             "Account & app settings",
             "Linked apps"
@@ -295,7 +299,7 @@
           ]
         },
         {
-          "name": "profile_settings_id",
+          "name": "account_app_settings_id",
           "match_all": [
             "Pengaturan akun",
             "Aplikasi tertaut"
@@ -317,10 +321,37 @@
           ]
         },
         {
-          "name": "profile_tab",
-          "match_any": [
-            "Profile",
-            "Profil"
+          "name": "account_safety",
+          "match_all": [
+            "Account & safety",
+            "Account & app settings"
+          ],
+          "match_none": [
+            "Linked apps"
+          ],
+          "steps": [
+            {
+              "action": "tap_source_text",
+              "text_any": [
+                "Account & app settings",
+                "Pengaturan akun"
+              ],
+              "match_mode": "prefix",
+              "clickable_only": true,
+              "exclude_heading": true,
+              "min_y_ratio": 0.35,
+              "row_center_x": true,
+              "timeout_s": 8
+            }
+          ]
+        },
+        {
+          "name": "account_safety_id",
+          "match_all": [
+            "Pengaturan akun"
+          ],
+          "match_none": [
+            "Aplikasi tertaut"
           ],
           "steps": [
             {
@@ -335,6 +366,36 @@
               "min_y_ratio": 0.12,
               "row_center_x": true,
               "timeout_s": 5
+            }
+          ]
+        },
+        {
+          "name": "home",
+          "match_all": [
+            "Home",
+            "Finance",
+            "QRIS",
+            "History",
+            "Profile"
+          ],
+          "match_none": [
+            "Account & safety",
+            "Account & app settings",
+            "Linked apps"
+          ],
+          "steps": [
+            {
+              "action": "tap_source_text",
+              "text_any": [
+                "Profile",
+                "Profil"
+              ],
+              "match_mode": "prefix",
+              "clickable_only": true,
+              "exclude_heading": true,
+              "min_y_ratio": 0.78,
+              "max_y_ratio": 0.99,
+              "timeout_s": 8
             }
           ]
         },

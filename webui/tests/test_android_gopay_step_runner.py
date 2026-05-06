@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -400,3 +401,112 @@ def test_step_runner_terminal_state_runs_cleanup_steps(tmp_path):
     assert result["terminal_state"] == "already_unlinked"
     assert driver.back_calls == 1
     assert driver.keycodes == [3]
+
+
+def test_configured_gopay_unlink_state_flow_returns_to_account_settings(tmp_path):
+    class By:
+        ID = "id"
+        XPATH = "xpath"
+        ACCESSIBILITY_ID = "accessibility_id"
+        ANDROID_UIAUTOMATOR = "android_uiautomator"
+
+    sources = {
+        "home": """
+        <hierarchy>
+          <node content-desc="Home" clickable="true" bounds="[0,2172][216,2340]" />
+          <node content-desc="Finance" clickable="true" bounds="[216,2172][432,2340]" />
+          <node content-desc="QRIS" clickable="true" bounds="[432,2172][648,2340]" />
+          <node content-desc="History" clickable="true" bounds="[648,2172][864,2340]" />
+          <node content-desc="Profile" clickable="true" bounds="[864,2172][1080,2340]" />
+        </hierarchy>
+        """,
+        "account_safety": """
+        <hierarchy>
+          <node pane-title="Account &amp; safety" bounds="[0,0][1080,2364]" />
+          <node content-desc="Account &amp; app settings&#10;Control your app preferences, data, linked apps and more." clickable="true" heading="false" bounds="[48,741][1032,1005]" />
+        </hierarchy>
+        """,
+        "account_app_settings": """
+        <hierarchy>
+          <node pane-title="Account &amp; app settings" bounds="[0,0][1080,2364]" />
+          <node content-desc="Popular service permission&#10;Manage information sharing permissions for each integrated app service." clickable="true" heading="false" bounds="[48,700][1032,940]" />
+          <node content-desc="Linked apps&#10;List of apps that you link to GoPay" clickable="true" heading="false" bounds="[48,940][1032,1120]" />
+        </hierarchy>
+        """,
+        "linked_apps": """
+        <hierarchy>
+          <node pane-title="Linked apps" bounds="[0,0][1080,2364]" />
+          <node content-desc="Linked apps" heading="true" clickable="false" bounds="[168,166][484,238]" />
+          <node content-desc="OpenAI LLC&#10;Linked on May 6, 2026" clickable="false" bounds="[264,292][640,424]" />
+          <node content-desc="Unlink" clickable="true" bounds="[766,290][990,396]" />
+        </hierarchy>
+        """,
+        "unlink_confirm": """
+        <hierarchy>
+          <node pane-title="Linked apps" bounds="[0,0][1080,2364]" />
+          <node content-desc="Linked apps" heading="true" clickable="false" bounds="[168,166][484,238]" />
+          <node content-desc="Unlink" clickable="true" bounds="[766,290][990,396]" />
+          <node content-desc="Unlink OpenAI LLC from GoPay?" clickable="false" bounds="[80,1750][1000,1840]" />
+          <node content-desc="Once unlinked, you can’t use GoPay for transactions in OpenAI LLC." clickable="false" bounds="[80,1850][1000,1940]" />
+          <node content-desc="Unlink" clickable="true" bounds="[48,2030][1032,2150]" />
+        </hierarchy>
+        """,
+        "unlinked": """
+        <hierarchy>
+          <node pane-title="Linked apps" bounds="[0,0][1080,2364]" />
+          <node content-desc="Successfully unlinked" clickable="false" bounds="[128,18][405,76]" />
+          <node content-desc="No apps linked to your GoPay" clickable="false" bounds="[85,602][448,622]" />
+        </hierarchy>
+        """,
+    }
+
+    class Driver:
+        def __init__(self):
+            self.current = "home"
+            self.page_source = sources[self.current]
+            self.gestures = []
+            self.back_calls = 0
+
+        def get_window_size(self):
+            return {"width": 1080, "height": 2400}
+
+        def execute_script(self, script, payload):
+            self.gestures.append((script, payload, self.current))
+            if self.current == "home":
+                self.current = "account_safety"
+            elif self.current == "account_safety":
+                self.current = "account_app_settings"
+            elif self.current == "account_app_settings":
+                self.current = "linked_apps"
+            elif self.current == "linked_apps":
+                self.current = "unlink_confirm"
+            elif self.current == "unlink_confirm":
+                self.current = "unlinked"
+            self.page_source = sources[self.current]
+
+        def back(self):
+            self.back_calls += 1
+            self.current = "account_app_settings"
+            self.page_source = sources[self.current]
+
+        def save_screenshot(self, path):
+            Path(path).write_bytes(b"png")
+
+    cfg = json.loads((ROOT / "CTF-pay" / "config.android-gopay.example.json").read_text())
+    states = cfg["android_automation"]["gopay_unlink"]["states"]
+    driver = Driver()
+    runner = android_gopay.StepRunner(driver, By, log=lambda _msg: None)
+
+    result = runner.run_states(states, out_dir=tmp_path, max_iterations=8, settle_s=0)
+
+    assert result["terminal_state"] == "already_unlinked"
+    assert result["history"] == [
+        "home",
+        "account_safety",
+        "account_app_settings",
+        "linked_apps",
+        "unlink_confirm",
+        "already_unlinked",
+    ]
+    assert driver.current == "account_app_settings"
+    assert driver.back_calls == 1
