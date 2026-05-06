@@ -83,6 +83,13 @@ def test_config_example_uses_android_otp_command():
     assert cfg["phone_worker"]["notification_source"] == "adb"
     assert cfg["phone_worker"]["otp_focus"]["focus_on_run_log"] is True
     assert "waiting WhatsApp OTP from relay" in cfg["phone_worker"]["otp_focus"]["run_log_trigger_strings"]
+    assert "[gopay] requesting WhatsApp OTP" in cfg["phone_worker"]["otp_focus"]["run_log_trigger_strings"]
+    assert "GOPAY_OTP_REQUEST" in cfg["phone_worker"]["otp_focus"]["run_log_trigger_strings"]
+    assert "gopay&&whatsapp&&otp" in cfg["phone_worker"]["otp_focus"]["run_log_trigger_strings"]
+    assert any(
+        trigger.startswith("GoPay&&poll&&")
+        for trigger in cfg["phone_worker"]["gopay_unlink"]["trigger_strings"]
+    )
     assert cfg["android_automation"]["otp"]["notification_source"] == "adb"
 
 

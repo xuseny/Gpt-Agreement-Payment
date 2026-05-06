@@ -249,6 +249,63 @@ def test_log_entry_matches_otp_focus_trigger_from_relay_wait():
     )
 
 
+def test_log_entry_matches_otp_focus_trigger_from_requesting_and_legacy_marker():
+    assert phone_worker._log_entry_matches_otp_focus_trigger(
+        {"seq": 8, "line": "[gopay] requesting WhatsApp OTP reference=abc attempt=1/3"},
+        phone_worker._otp_focus_run_log_trigger_strings({}),
+    )
+    assert phone_worker._log_entry_matches_otp_focus_trigger(
+        {"seq": 9, "line": "GOPAY_OTP_REQUEST path=output/gopay-otp.txt"},
+        phone_worker._otp_focus_run_log_trigger_strings({}),
+    )
+
+
+def test_log_entry_matches_keyword_group_trigger_case_insensitive():
+    entry = {
+        "seq": 7,
+        "line": "      GoPay authorization finished; continue POLL result ...",
+    }
+
+    assert phone_worker._log_entry_matches_unlink_trigger(
+        entry,
+        ["gopay&&authorization&&poll&&result"],
+    )
+    assert not phone_worker._log_entry_matches_unlink_trigger(
+        entry,
+        ["gopay&&paypal&&poll"],
+    )
+
+
+def test_latest_matching_entry_uses_highest_seq():
+    lines = [
+        {"seq": 8, "line": "[gopay] waiting WhatsApp OTP from relay: old"},
+        {"seq": 11, "line": "[gopay] requesting WhatsApp OTP reference=new"},
+        {"seq": 9, "line": "noise"},
+    ]
+
+    entry = phone_worker._latest_matching_entry(
+        lines,
+        phone_worker._log_entry_matches_otp_focus_trigger,
+        phone_worker._otp_focus_run_log_trigger_strings({}),
+    )
+
+    assert entry["seq"] == 11
+
+
+def test_focus_and_unlink_trigger_strings_merge_defaults_with_configured_values():
+    focus_triggers = phone_worker._otp_focus_run_log_trigger_strings(
+        {"run_log_trigger_strings": ["custom whatsapp marker"]},
+    )
+    unlink_triggers = phone_worker._gopay_unlink_trigger_strings(
+        {"trigger_strings": ["custom gopay marker"]},
+    )
+
+    assert "custom whatsapp marker" in focus_triggers
+    assert "[gopay] requesting WhatsApp OTP" in focus_triggers
+    assert "custom gopay marker" in unlink_triggers
+    assert any(trigger.startswith("GoPay&&poll&&") for trigger in unlink_triggers)
+
+
 def test_run_log_focus_event_uses_run_log_fingerprint():
     entry = {
         "seq": 9,

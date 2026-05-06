@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 
 HERE = Path(__file__).resolve().parent
@@ -34,12 +34,19 @@ DEFAULT_CONFIG = HERE / "config.android-gopay.example.json"
 DEFAULT_PUSH_PATH = "/api/whatsapp/sidecar/state"
 DEFAULT_RUN_LOGS_PATH = "/api/run/sidecar/logs"
 DEFAULT_STATE_FILE = Path("output/android-phone-worker-state.json")
-DEFAULT_GOPAY_UNLINK_TRIGGER_STRINGS = ("GoPay \u6388\u6743 + \u6263\u6b3e\u5b8c\u6210",)
+DEFAULT_GOPAY_UNLINK_TRIGGER_STRINGS = (
+    "GoPay \u6388\u6743 + \u6263\u6b3e\u5b8c\u6210",
+    "GoPay&&\u6388\u6743&&\u6263\u6b3e&&\u5b8c\u6210",
+    "GoPay&&poll&&\u7ed3\u679c",
+)
 DEFAULT_OTP_FOCUS_RUN_LOG_TRIGGER_STRINGS = (
     "[gopay] waiting WhatsApp OTP",
+    "[gopay] requesting WhatsApp OTP",
     "waiting WhatsApp OTP from relay",
     "waiting WhatsApp OTP from file",
     "waiting WhatsApp OTP from command",
+    "GOPAY_OTP_REQUEST",
+    "gopay&&whatsapp&&otp",
 )
 DEFAULT_OTP_FOCUS_NOTIFICATION_KEYWORDS = (
     "gopay",
@@ -299,9 +306,24 @@ def _entry_line(entry: Any) -> str:
     return str(entry or "")
 
 
+def _normalize_log_text(value: str) -> str:
+    return " ".join(str(value or "").lower().split())
+
+
+def _trigger_matches_line(line: str, trigger: str) -> bool:
+    trigger = str(trigger or "").strip()
+    if not trigger:
+        return False
+    normalized_line = _normalize_log_text(line)
+    if "&&" in trigger:
+        terms = [_normalize_log_text(part) for part in trigger.split("&&") if part.strip()]
+        return bool(terms) and all(term in normalized_line for term in terms)
+    return _normalize_log_text(trigger) in normalized_line
+
+
 def _log_entry_matches_trigger(entry: Any, trigger_strings: list[str]) -> bool:
     line = _entry_line(entry)
-    return any(trigger and trigger in line for trigger in trigger_strings)
+    return any(_trigger_matches_line(line, trigger) for trigger in trigger_strings)
 
 
 def _log_entry_matches_unlink_trigger(entry: Any, trigger_strings: list[str]) -> bool:
@@ -312,18 +334,49 @@ def _log_entry_matches_otp_focus_trigger(entry: Any, trigger_strings: list[str])
     return _log_entry_matches_trigger(entry, trigger_strings)
 
 
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    try:
+        return [str(item) for item in value if str(item).strip()]
+    except TypeError:
+        text = str(value).strip()
+        return [text] if text else []
+
+
+def _merged_trigger_strings(configured: Any, defaults: tuple[str, ...]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in list(defaults) + _string_list(configured):
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
 def _otp_focus_run_log_trigger_strings(focus_cfg: dict) -> list[str]:
     raw = (
         focus_cfg.get("run_log_trigger_strings")
         or focus_cfg.get("log_trigger_strings")
         or focus_cfg.get("run_log_triggers")
-        or DEFAULT_OTP_FOCUS_RUN_LOG_TRIGGER_STRINGS
     )
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, (list, tuple)):
-        return []
-    return [str(item) for item in raw if str(item).strip()]
+    return _merged_trigger_strings(raw, DEFAULT_OTP_FOCUS_RUN_LOG_TRIGGER_STRINGS)
+
+
+def _gopay_unlink_trigger_strings(unlink_worker_cfg: dict) -> list[str]:
+    raw = unlink_worker_cfg.get("trigger_strings") or unlink_worker_cfg.get("triggers")
+    return _merged_trigger_strings(raw, DEFAULT_GOPAY_UNLINK_TRIGGER_STRINGS)
+
+
+def _latest_matching_entry(lines: list[Any], matcher: Callable[[Any, list[str]], bool], trigger_strings: list[str]) -> Any | None:
+    matches = [entry for entry in lines if matcher(entry, trigger_strings)]
+    if not matches:
+        return None
+    return max(matches, key=_entry_seq)
 
 
 def _run_log_focus_event(entry: Any, *, now: Optional[float] = None) -> dict:
@@ -583,15 +636,7 @@ def run_worker(args: argparse.Namespace) -> int:
     unlink_timeout_s = float(unlink_worker_cfg.get("timeout_s") or 120)
     ignore_existing_run_logs = bool(unlink_worker_cfg.get("ignore_existing_run_logs_on_start", True))
     otp_focus_run_log_trigger_strings = _otp_focus_run_log_trigger_strings(otp_focus_cfg)
-    trigger_strings = [
-        str(item)
-        for item in (
-            unlink_worker_cfg.get("trigger_strings")
-            or unlink_worker_cfg.get("triggers")
-            or DEFAULT_GOPAY_UNLINK_TRIGGER_STRINGS
-        )
-        if str(item).strip()
-    ]
+    trigger_strings = _gopay_unlink_trigger_strings(unlink_worker_cfg)
     try:
         last_run_log_seq = int(state.get("last_run_log_seq") or 0)
     except Exception:
@@ -650,19 +695,18 @@ def run_worker(args: argparse.Namespace) -> int:
                         else:
                             otp_focus_entry = None
                             if otp_focus_on_run_log:
-                                for entry in lines:
-                                    if _log_entry_matches_otp_focus_trigger(
-                                        entry,
-                                        otp_focus_run_log_trigger_strings,
-                                    ):
-                                        otp_focus_entry = entry
-                                        break
+                                otp_focus_entry = _latest_matching_entry(
+                                    lines,
+                                    _log_entry_matches_otp_focus_trigger,
+                                    otp_focus_run_log_trigger_strings,
+                                )
                             trigger_entry = None
                             if auto_unlink_enabled:
-                                for entry in lines:
-                                    if _log_entry_matches_unlink_trigger(entry, trigger_strings):
-                                        trigger_entry = entry
-                                        break
+                                trigger_entry = _latest_matching_entry(
+                                    lines,
+                                    _log_entry_matches_unlink_trigger,
+                                    trigger_strings,
+                                )
                             last_run_log_seq = max_seq
                             state["last_run_log_seq"] = last_run_log_seq
                             if otp_focus_entry is not None:

@@ -53,16 +53,21 @@
       "focus_on_run_log": true,
       "run_log_trigger_strings": [
         "[gopay] waiting WhatsApp OTP",
+        "[gopay] requesting WhatsApp OTP",
         "waiting WhatsApp OTP from relay",
         "waiting WhatsApp OTP from file",
-        "waiting WhatsApp OTP from command"
+        "waiting WhatsApp OTP from command",
+        "GOPAY_OTP_REQUEST",
+        "gopay&&whatsapp&&otp"
       ]
     },
     "gopay_unlink": {
       "enabled": true,
       "run_logs_path": "/api/run/sidecar/logs",
       "trigger_strings": [
-        "GoPay \u6388\u6743 + \u6263\u6b3e\u5b8c\u6210"
+        "GoPay \u6388\u6743 + \u6263\u6b3e\u5b8c\u6210",
+        "GoPay&&\u6388\u6743&&\u6263\u6b3e&&\u5b8c\u6210",
+        "GoPay&&poll&&\u7ed3\u679c"
       ],
       "ignore_existing_run_logs_on_start": true,
       "poll_interval_s": 2,
