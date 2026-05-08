@@ -25,6 +25,7 @@ output/
 CTF-pay/config.paypal.json
 CTF-pay/config.paypal-*.json
 CTF-pay/config.android-gopay.local.json
+CTF-pay/config.android-gopay.lane-*.local.json
 CTF-reg/config.paypal-proxy.json
 CTF-reg/config.paypal-proxy-*.json
 CTF-reg/config.noproxy.json

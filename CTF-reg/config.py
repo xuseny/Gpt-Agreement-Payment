@@ -9,20 +9,27 @@ from typing import Optional
 
 @dataclass
 class MailConfig:
-    """邮箱服务配置（CF Email Worker → KV 路径）。
+    """邮箱服务配置。
 
-    OTP 走 Cloudflare Email Routing → otp-relay Worker → KV。原 IMAP/SMTP
+    支持两条 OTP 路径：
+      1. Cloudflare Email Routing → otp-relay Worker → KV
+      2. 预置 Hotmail 邮箱池 + 收件 API 轮询
+
+    原 IMAP/SMTP
     字段（imap_server/imap_port/smtp_*/email/auth_code）已彻底废弃；旧
     config 文件里残留这些字段会被 Config.from_file 静默忽略。
 
     KV 凭证（api_token / account_id / kv_namespace_id）放 SQLite runtime_meta[secrets]
     的 cloudflare 段或环境变量，不在 MailConfig 里。
     """
+    source: str = ""
     catch_all_domain: str = ""
     # 域名池：pipeline 运行时从中挑一个作为 catch_all_domain（轮换 + 根据 invite 探测结果烧掉）
     catch_all_domains: list = field(default_factory=list)
     # Cloudflare 按需开通子域（被 pipeline 读取使用，CTF-reg 自身不处理）
     auto_provision: dict = field(default_factory=dict)
+    # 预置 Hotmail 邮箱池：每行 `邮箱----收件api`
+    hotmail_pool: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -106,8 +113,10 @@ class Config:
         if "mail" in data:
             # 过滤已废弃的 IMAP/SMTP 字段（imap_server, imap_port, smtp_*,
             # email, auth_code），让旧 config 仍然能跑而不抛 unexpected
-            # keyword 错。新代码请只配 catch_all_domain(s) + auto_provision。
+            # keyword 错。新代码请只配 catch_all_domain(s) / auto_provision
+            # 或 hotmail_pool。
             cfg.mail = MailConfig(**filtered_kwargs(MailConfig, data["mail"]))
+            setattr(cfg.mail, "_config_dir", os.path.dirname(os.path.abspath(path)))
         if "card" in data:
             cfg.card = CardInfo(**filtered_kwargs(CardInfo, data["card"]))
         if "billing" in data:

@@ -60,6 +60,15 @@ DEFAULT_OTP_FOCUS_NOTIFICATION_KEYWORDS = (
     "verification",
     "code",
 )
+DEFAULT_OTP_FOCUS_RUN_LOG_CLEAR_MARKERS = (
+    "[gopay] received WhatsApp OTP from relay:",
+    "[gopay] submitting WhatsApp OTP",
+    "[gopay] otp ok",
+    "[gopay] linking complete",
+    "[gopay] chatgpt verify ok",
+    "payment succeeded",
+)
+MAX_PUSH_HISTORY = 200
 
 
 class PhoneWorkerError(RuntimeError):
@@ -189,7 +198,7 @@ def _fingerprint(code: str, package_name: str, text: str, notification_ts: Optio
     return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
 
 
-def _extract_otp_event(payload: Any, otp_cfg: dict, *, now: Optional[float] = None, engine: str = "android_appium") -> dict | None:
+def _extract_otp_events(payload: Any, otp_cfg: dict, *, now: Optional[float] = None, engine: str = "android_appium") -> list[dict]:
     now = time.time() if now is None else now
     code_regex = str(otp_cfg.get("code_regex") or android.DEFAULT_CODE_REGEX)
     candidates = []
@@ -216,16 +225,20 @@ def _extract_otp_event(payload: Any, otp_cfg: dict, *, now: Optional[float] = No
             "_rank_ts": notification_ts or 0.0,
             "_rank_index": index,
         })
-    if not candidates:
-        return None
-    event = max(
-        candidates,
+    candidates.sort(
         key=lambda item: (bool(item["_rank_has_ts"]), float(item["_rank_ts"]), int(item["_rank_index"])),
+        reverse=True,
     )
-    event.pop("_rank_has_ts", None)
-    event.pop("_rank_ts", None)
-    event.pop("_rank_index", None)
-    return event
+    for event in candidates:
+        event.pop("_rank_has_ts", None)
+        event.pop("_rank_ts", None)
+        event.pop("_rank_index", None)
+    return candidates
+
+
+def _extract_otp_event(payload: Any, otp_cfg: dict, *, now: Optional[float] = None, engine: str = "android_appium") -> dict | None:
+    events = _extract_otp_events(payload, otp_cfg, now=now, engine=engine)
+    return events[0] if events else None
 
 
 def _post_json(url: str, token: str, payload: dict, *, timeout: float) -> dict:
@@ -306,6 +319,15 @@ def _entry_line(entry: Any) -> str:
     return str(entry or "")
 
 
+def _entry_ts(entry: Any) -> float:
+    if not isinstance(entry, dict):
+        return 0.0
+    try:
+        return float(entry.get("ts") or entry.get("time") or 0.0)
+    except Exception:
+        return 0.0
+
+
 def _normalize_log_text(value: str) -> str:
     return " ".join(str(value or "").lower().split())
 
@@ -330,7 +352,18 @@ def _log_entry_matches_unlink_trigger(entry: Any, trigger_strings: list[str]) ->
     return _log_entry_matches_trigger(entry, trigger_strings)
 
 
+def _otp_focus_line_clears_wait(line: str) -> bool:
+    normalized_line = _normalize_log_text(line)
+    return any(
+        _normalize_log_text(marker) in normalized_line
+        for marker in DEFAULT_OTP_FOCUS_RUN_LOG_CLEAR_MARKERS
+    )
+
+
 def _log_entry_matches_otp_focus_trigger(entry: Any, trigger_strings: list[str]) -> bool:
+    line = _entry_line(entry)
+    if _otp_focus_line_clears_wait(line):
+        return False
     return _log_entry_matches_trigger(entry, trigger_strings)
 
 
@@ -380,7 +413,7 @@ def _latest_matching_entry(lines: list[Any], matcher: Callable[[Any, list[str]],
 
 
 def _run_log_focus_event(entry: Any, *, now: Optional[float] = None) -> dict:
-    now = time.time() if now is None else now
+    now = _entry_ts(entry) or (time.time() if now is None else now)
     seq = _entry_seq(entry)
     line = _entry_line(entry)
     fingerprint_raw = f"otp-focus-run-log\n{seq}\n{line}"
@@ -537,11 +570,59 @@ def _build_push_payload(event: dict, auto_cfg: dict) -> dict:
     }
 
 
+def _recent_push_history(state: dict) -> list[dict]:
+    raw = state.get("recent_push_history")
+    if not isinstance(raw, list):
+        return []
+    result: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        fingerprint = str(item.get("fingerprint") or "").strip()
+        code = str(item.get("code") or "").strip()
+        try:
+            pushed_at = float(item.get("pushed_at") or 0.0)
+        except Exception:
+            pushed_at = 0.0
+        if not fingerprint and not code:
+            continue
+        result.append({
+            "fingerprint": fingerprint,
+            "code": code,
+            "pushed_at": pushed_at,
+        })
+    return result
+
+
+def _prune_push_history(history: list[dict], *, now: Optional[float] = None, dedupe_window_s: float = 0.0) -> list[dict]:
+    current = time.time() if now is None else now
+    keep_after = current - max(0.0, dedupe_window_s)
+    pruned: list[dict] = []
+    for item in history:
+        try:
+            pushed_at = float(item.get("pushed_at") or 0.0)
+        except Exception:
+            pushed_at = 0.0
+        if dedupe_window_s > 0 and pushed_at and pushed_at < keep_after and not str(item.get("fingerprint") or "").strip():
+            continue
+        pruned.append({
+            "fingerprint": str(item.get("fingerprint") or "").strip(),
+            "code": str(item.get("code") or "").strip(),
+            "pushed_at": pushed_at,
+        })
+    if len(pruned) > MAX_PUSH_HISTORY:
+        pruned = pruned[-MAX_PUSH_HISTORY:]
+    return pruned
+
+
 def _should_skip_event(event: dict, state: dict, *, first_scan: bool, ignore_existing: bool, dedupe_window_s: float) -> str:
     fp = str(event.get("fingerprint") or "")
     now = float(event.get("ts") or time.time())
     if fp and fp == state.get("last_fingerprint"):
         return "duplicate_fingerprint"
+    for item in _recent_push_history(state):
+        if fp and fp == item.get("fingerprint"):
+            return "duplicate_fingerprint"
     last_code = str(state.get("last_code") or "")
     try:
         last_pushed_event_ts = float(state.get("last_pushed_event_ts") or 0.0)
@@ -555,6 +636,16 @@ def _should_skip_event(event: dict, state: dict, *, first_scan: bool, ignore_exi
         last_at = 0.0
     if last_code and last_code == str(event.get("otp") or "") and now - last_at < dedupe_window_s:
         return "duplicate_code"
+    event_code = str(event.get("otp") or "")
+    if event_code and dedupe_window_s > 0:
+        for item in _recent_push_history(state):
+            code = str(item.get("code") or "")
+            try:
+                pushed_at = float(item.get("pushed_at") or 0.0)
+            except Exception:
+                pushed_at = 0.0
+            if code and code == event_code and now - pushed_at < dedupe_window_s:
+                return "duplicate_code"
     if first_scan and ignore_existing:
         return "initial_existing_notification"
     return ""
@@ -570,14 +661,24 @@ def _push_delay_remaining(event: dict, delay_s: float, *, now: Optional[float] =
 
 
 def _remember_event(path: Path, state: dict, event: dict, *, pushed: bool) -> None:
+    current = time.time()
     state.update({
         "last_fingerprint": event.get("fingerprint") or "",
         "last_code": event.get("otp") or "",
-        "last_seen_at": time.time(),
+        "last_seen_at": current,
     })
     if pushed:
-        state["last_pushed_at"] = time.time()
+        state["last_pushed_at"] = current
         state["last_pushed_event_ts"] = float(event.get("ts") or 0.0)
+        history = _prune_push_history(
+            _recent_push_history(state) + [{
+                "fingerprint": event.get("fingerprint") or "",
+                "code": event.get("otp") or "",
+                "pushed_at": current,
+            }],
+            now=current,
+        )
+        state["recent_push_history"] = history
     _save_state(path, state)
 
 
@@ -631,6 +732,17 @@ def run_worker(args: argparse.Namespace) -> int:
         or interval_s
     )
     run_log_limit = int(otp_focus_cfg.get("run_log_limit") or unlink_worker_cfg.get("log_limit") or 500)
+    otp_read_delay_after_run_log_s = float(
+        otp_focus_cfg.get("read_delay_after_run_log_trigger_s")
+        or worker_cfg.get("otp_read_delay_after_run_log_trigger_s")
+        or 0
+    )
+    otp_push_immediately_after_run_log = bool(
+        otp_focus_cfg.get(
+            "push_immediately_after_run_log_trigger",
+            worker_cfg.get("otp_push_immediately_after_run_log_trigger", False),
+        )
+    )
     unlink_out_dir = str(unlink_worker_cfg.get("out_dir") or "output/android-gopay-unlink")
     unlink_delay_s = float(unlink_worker_cfg.get("delay_after_trigger_s") or 0)
     unlink_timeout_s = float(unlink_worker_cfg.get("timeout_s") or 120)
@@ -641,6 +753,15 @@ def run_worker(args: argparse.Namespace) -> int:
         last_run_log_seq = int(state.get("last_run_log_seq") or 0)
     except Exception:
         last_run_log_seq = 0
+    try:
+        otp_wait_since = float(state.get("last_otp_wait_since") or 0.0)
+    except Exception:
+        otp_wait_since = 0.0
+    try:
+        otp_read_after = float(state.get("last_otp_read_after") or 0.0)
+    except Exception:
+        otp_read_after = 0.0
+    otp_wait_active = bool(state.get("otp_wait_active", False))
 
     android._adb_connect(auto_cfg)
     android._configure_screen_awake(auto_cfg)
@@ -671,6 +792,17 @@ def run_worker(args: argparse.Namespace) -> int:
                         timeout=post_timeout_s,
                     )
                     status = log_payload.get("status") if isinstance(log_payload.get("status"), dict) else {}
+                    active_otp_wait = bool(status.get("otp_pending"))
+                    otp_wait_active = active_otp_wait
+                    state["otp_wait_active"] = active_otp_wait
+                    if active_otp_wait and not otp_wait_since:
+                        otp_wait_since = time.time()
+                        state["last_otp_wait_since"] = otp_wait_since
+                    if active_otp_wait and otp_read_delay_after_run_log_s > 0 and not otp_read_after:
+                        otp_read_after = otp_wait_since + otp_read_delay_after_run_log_s
+                        state["last_otp_read_after"] = otp_read_after
+                    if not active_otp_wait:
+                        otp_read_after = 0.0
                     try:
                         log_count = int(status.get("log_count") or 0)
                     except Exception:
@@ -688,7 +820,13 @@ def run_worker(args: argparse.Namespace) -> int:
                     lines = log_payload.get("lines") if isinstance(log_payload.get("lines"), list) else []
                     if lines:
                         max_seq = max([last_run_log_seq] + [_entry_seq(entry) for entry in lines])
-                        if first_run_log_scan and ignore_existing_run_logs:
+                        allow_active_otp_focus = (
+                            first_run_log_scan
+                            and ignore_existing_run_logs
+                            and active_otp_wait
+                            and otp_focus_on_run_log
+                        )
+                        if first_run_log_scan and ignore_existing_run_logs and not allow_active_otp_focus:
                             last_run_log_seq = max_seq
                             state["last_run_log_seq"] = last_run_log_seq
                             _save_state(state_path, state)
@@ -701,7 +839,9 @@ def run_worker(args: argparse.Namespace) -> int:
                                     otp_focus_run_log_trigger_strings,
                                 )
                             trigger_entry = None
-                            if auto_unlink_enabled:
+                            if auto_unlink_enabled and not (
+                                first_run_log_scan and ignore_existing_run_logs
+                            ):
                                 trigger_entry = _latest_matching_entry(
                                     lines,
                                     _log_entry_matches_unlink_trigger,
@@ -711,9 +851,15 @@ def run_worker(args: argparse.Namespace) -> int:
                             state["last_run_log_seq"] = last_run_log_seq
                             if otp_focus_entry is not None:
                                 otp_focus_seq = _entry_seq(otp_focus_entry)
+                                otp_wait_since = _entry_ts(otp_focus_entry) or time.time()
+                                otp_read_after = otp_wait_since + max(0.0, otp_read_delay_after_run_log_s)
                                 state["last_otp_focus_run_log_seq"] = otp_focus_seq
                                 state["last_otp_focus_run_log_line"] = _entry_line(otp_focus_entry)[:300]
                                 state["last_otp_focus_run_log_at"] = time.time()
+                                state["last_otp_wait_since"] = otp_wait_since
+                                state["last_otp_read_after"] = otp_read_after
+                                state["otp_wait_active"] = True
+                                otp_wait_active = True
                                 _save_state(state_path, state)
                                 _log(
                                     f"otp focus trigger seq={otp_focus_seq}: "
@@ -814,7 +960,7 @@ def run_worker(args: argparse.Namespace) -> int:
                     time.sleep(max(1.0, interval_s))
                     continue
 
-            event = _extract_otp_event(payload, otp_cfg, engine=engine) if payload is not None else None
+            events = _extract_otp_events(payload, otp_cfg, engine=engine) if payload is not None else []
             focus_hint = (
                 _extract_otp_focus_hint(payload, otp_cfg, otp_focus_cfg, engine=engine)
                 if payload is not None
@@ -823,7 +969,7 @@ def run_worker(args: argparse.Namespace) -> int:
             if focus_hint is not None and not (first_scan and ignore_existing):
                 _maybe_focus_otp_app(auto_cfg, otp_focus_cfg, state_path, state, focus_hint)
 
-            if not event:
+            if not events:
                 if args.once:
                     _log("no otp notification found")
                     return 1
@@ -831,15 +977,54 @@ def run_worker(args: argparse.Namespace) -> int:
                 time.sleep(max(0.5, interval_s))
                 continue
 
-            reason = _should_skip_event(
-                event,
-                state,
-                first_scan=first_scan,
-                ignore_existing=ignore_existing,
-                dedupe_window_s=dedupe_window_s,
-            )
-            if args.force:
-                reason = ""
+            if otp_wait_active and otp_read_after and time.time() < otp_read_after:
+                wait_s = max(0.0, otp_read_after - time.time())
+                delay_key = f"otp-read-after:{int(otp_read_after)}"
+                try:
+                    last_delay_log_at = float(state.get("last_delay_log_at") or 0.0)
+                except Exception:
+                    last_delay_log_at = 0.0
+                now = time.time()
+                should_log_delay = (
+                    delay_key != state.get("last_delay_log_key")
+                    or now - last_delay_log_at >= skip_log_interval_s
+                )
+                if should_log_delay:
+                    _log(f"wait {wait_s:.1f}s after OTP request before reading notification")
+                    state["last_delay_log_key"] = delay_key
+                    state["last_delay_log_at"] = now
+                    _save_state(state_path, state)
+                first_scan = False
+                time.sleep(max(0.5, min(interval_s, wait_s)))
+                continue
+
+            event = None
+            reason = ""
+            skipped: list[tuple[dict, str]] = []
+            for candidate in events:
+                candidate_reason = _should_skip_event(
+                    candidate,
+                    state,
+                    first_scan=first_scan,
+                    ignore_existing=ignore_existing,
+                    dedupe_window_s=dedupe_window_s,
+                )
+                if args.force:
+                    candidate_reason = ""
+                if candidate_reason == "initial_existing_notification" and otp_wait_active:
+                    event_ts = (
+                        _coerce_epoch(candidate.get("notification_ts"))
+                        or _coerce_epoch(candidate.get("ts"))
+                        or time.time()
+                    )
+                    if not otp_wait_since or event_ts >= otp_wait_since - 5.0:
+                        candidate_reason = ""
+                if not candidate_reason:
+                    event = candidate
+                    break
+                skipped.append((candidate, candidate_reason))
+            if event is None and skipped:
+                event, reason = skipped[0]
             if reason:
                 skip_key = f"{reason}:{event.get('fingerprint') or event.get('otp') or ''}"
                 try:
@@ -865,7 +1050,8 @@ def run_worker(args: argparse.Namespace) -> int:
 
             _maybe_focus_otp_app(auto_cfg, otp_focus_cfg, state_path, state, event)
 
-            delay_remaining_s = 0.0 if args.force else _push_delay_remaining(event, push_delay_s)
+            bypass_push_delay = bool(otp_wait_active and otp_push_immediately_after_run_log)
+            delay_remaining_s = 0.0 if (args.force or bypass_push_delay) else _push_delay_remaining(event, push_delay_s)
             if delay_remaining_s > 0:
                 delay_key = f"{event.get('fingerprint') or event.get('otp') or ''}:{int(float(event.get('ts') or 0))}"
                 try:

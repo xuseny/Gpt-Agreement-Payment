@@ -1,10 +1,20 @@
 {
   "mail": {
-    "_comment": "OTP 走 Cloudflare Email Worker → KV（见 scripts/setup_cf_email_worker.py + scripts/otp_email_worker.js）。CF 凭证存 SQLite runtime_meta[secrets].cloudflare 段，不在这里。",
+    "_comment": "默认 source=cf_kv。若改用预置 Hotmail 邮箱池，把 source 改成 hotmail_pool，并按 `邮箱----收件api` 配置 hotmail_pool.path。",
+    "source": "cf_kv",
     "catch_all_domain": "subdomain.example.com",
     "catch_all_domains": [
       "subdomain.example.com"
     ],
+    "hotmail_pool": {
+      "enabled": false,
+      "path": "./hotmail-pool.example.txt",
+      "state_path": "../output/hotmail-pool-state.json",
+      "delimiter": "----",
+      "poll_interval_s": 3,
+      "request_timeout_s": 20,
+      "issued_after_grace_s": 45
+    },
     "auto_provision": {
       "enabled": false,
       "zone_name": "example.com",

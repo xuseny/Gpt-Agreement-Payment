@@ -8,7 +8,7 @@
   2. 点击 Sign up → 跳转到 auth.openai.com
   3. 填邮箱 → Continue
   4. 填密码 → Continue（可能触发 Turnstile，Camoufox 指纹可通过）
-  5. IMAP 取 OTP → 填入 → Continue
+  5. mail_provider 取 OTP → 填入 → Continue
   6. 填姓名/生日 → Continue
   7. 回到 chatgpt.com → 从 /api/auth/session 拿 access_token
   8. 从 Cookie 拿 session_token / oai-did

@@ -138,6 +138,7 @@ def test_config_example_unlink_targets_linked_apps_from_profile_settings():
     assert states["popular_service_permission"]["match_all"] == ["Popular service permission"]
     assert "No permission setting recorded" in states["popular_service_permission"]["match_any"]
     assert states["popular_service_permission"]["steps"][0]["action"] == "back"
+    assert cfg["android_automation"]["gopay_unlink"]["state_settle_s"] == 2
     assert cfg["android_automation"]["gopay_unlink"]["exit_to_home_on_complete"] is False
     assert states["already_unlinked"]["terminal_steps"][-1]["action"] == "wait_text_any"
 

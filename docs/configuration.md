@@ -131,9 +131,19 @@ cp CTF-reg/config.example.json              CTF-reg/config.noproxy.json
 ```json
 {
   "mail": {
-    "_comment": "OTP 走 CF Email Worker → KV，凭证在 SQLite runtime_meta[secrets]，这里只配 catch-all 域名",
+    "_comment": "默认 source=cf_kv。若改用预置 Hotmail 邮箱池，把 source 改成 hotmail_pool，并配置 hotmail_pool.path（每行 `邮箱----收件api`）",
+    "source": "cf_kv",
     "catch_all_domain": "subdomain.example.com",
     "catch_all_domains": ["subdomain.example.com"],
+    "hotmail_pool": {
+      "enabled": false,
+      "path": "./hotmail-pool.local.txt",
+      "state_path": "../output/hotmail-pool-state.json",
+      "delimiter": "----",
+      "poll_interval_s": 3,
+      "request_timeout_s": 20,
+      "issued_after_grace_s": 45
+    },
     "auto_provision": {
       "enabled": false,
       "zone_names": ["zone-a.example", "zone-b.example"],
@@ -173,6 +183,18 @@ cp CTF-reg/config.example.json              CTF-reg/config.noproxy.json
 > 也可以用环境变量 `CF_API_TOKEN` / `CF_ACCOUNT_ID` / `CF_OTP_KV_NAMESPACE_ID`
 > 临时覆盖。
 
+> **Hotmail 池模式：`邮箱----收件api`**
+>
+> 如果不再走 CF catch-all，也可以把 `mail.source` 改成 `hotmail_pool`，再准备一个池文件：
+>
+> ```text
+> alpha-account@hotmail.com----https://mailapi.icu/key?type=html&orderNo=YOUR_ORDER_NO_001
+> bravo-account@hotmail.com----https://mailapi.icu/key?type=html&orderNo=YOUR_ORDER_NO_002
+> ```
+>
+> 建议 API 直接写 `type=html`。实测有些订单默认 JSON 的 `verification_code` 为空，但 `type=html`
+> 能返回完整邮件正文，当前代码会优先读结构化字段，取不到再从 HTML / 文本内容里抽 6 位验证码。
+
 `mail.auto_provision` 是多 zone 域池配置：
 
 | 字段 | 含义 |
@@ -183,6 +205,18 @@ cp CTF-reg/config.example.json              CTF-reg/config.noproxy.json
 | `min_segs` / `max_segs` | 子域有几段（如 `aaa.bbb.zone` 是 2 段） |
 | `min_seg_len` / `max_seg_len` | 每段长度 |
 | `dns_propagation_s` | 开新子域后等多久 DNS 生效 |
+
+`mail.hotmail_pool` 字段：
+
+| 字段 | 含义 |
+|---|---|
+| `enabled` | 是否启用 Hotmail 池 |
+| `path` | 池文件路径；相对路径按注册配置文件所在目录解析 |
+| `state_path` | 顺序游标状态文件；不配时默认写到池文件旁边 |
+| `delimiter` | 行分隔符，默认 `----` |
+| `poll_interval_s` | 收件 API 轮询间隔 |
+| `request_timeout_s` | 单次请求超时 |
+| `issued_after_grace_s` | 允许回看最近邮件的时间窗，避免页面慢一步时误判旧码 |
 
 ---
 

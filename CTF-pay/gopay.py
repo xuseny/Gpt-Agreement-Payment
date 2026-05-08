@@ -714,6 +714,42 @@ class GoPayCharger:
                 continue
             if r.status_code == 429:
                 rate_limit_attempts += 1
+                # Postman 绕过思路：Midtrans 的 429 风控是基于 Basic Auth 的 client_id 维度，
+                # 同 URL 去掉 Authorization 头再请求，往往直接返回 201 + activation_link_url。
+                self.log(
+                    f"[gopay] midtrans linking 429 rate limited，"
+                    f"尝试去掉 Authorization 头重发 (postman 绕过风控) #{rate_limit_attempts}"
+                )
+                headers_no_auth = {
+                    k: v for k, v in headers.items() if k.lower() != "authorization"
+                }
+                try:
+                    r_noauth = self.ext.post(
+                        url,
+                        json=body,
+                        headers=headers_no_auth,
+                        timeout=DEFAULT_TIMEOUT,
+                    )
+                except Exception as exc:
+                    self.log(f"[gopay] midtrans linking no-auth 重发异常: {exc}")
+                    r_noauth = None
+                if r_noauth is not None and r_noauth.status_code == 201:
+                    data = r_noauth.json()
+                    m = re.search(
+                        r"reference=([a-f0-9-]{36})",
+                        data.get("activation_link_url", ""),
+                    )
+                    if not m:
+                        raise GoPayError(
+                            f"midtrans linking 201 (no-auth) but no reference: {data}"
+                        )
+                    ref = m.group(1)
+                    self.log(
+                        f"[gopay] midtrans linking ok (no-auth bypass) reference={ref}"
+                    )
+                    return ref
+                noauth_status = getattr(r_noauth, "status_code", "n/a")
+                noauth_body = getattr(r_noauth, "text", "")[:200] if r_noauth is not None else ""
                 retry_after = r.headers.get("Retry-After", "")
                 fallback_sleep = min(
                     LINK_RATE_LIMIT_MAX_SLEEP_S,
@@ -725,7 +761,8 @@ class GoPayCharger:
                     LINK_RATE_LIMIT_MAX_SLEEP_S,
                 )
                 self.log(
-                    f"[gopay] midtrans linking 429 rate limited，"
+                    f"[gopay] midtrans linking no-auth 兜底失败 "
+                    f"status={noauth_status} body={noauth_body!r}；"
                     f"冷却 {sleep_s:.0f}s 后继续重试 #{rate_limit_attempts}"
                 )
                 time.sleep(sleep_s)

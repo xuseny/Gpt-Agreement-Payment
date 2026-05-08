@@ -64,6 +64,100 @@ def test_extract_otp_event_prefers_newest_notification_timestamp():
     assert event["notification_ts"] == 1777947000
 
 
+def test_extract_otp_events_keeps_alternate_candidates_after_duplicate():
+    payload = {
+        "statusBarNotifications": [
+            {
+                "packageName": "com.whatsapp",
+                "title": "GoPay",
+                "text": "Kode verifikasi GoPay Anda adalah 399008",
+                "postTime": 1777947000000,
+            },
+            {
+                "packageName": "com.whatsapp",
+                "title": "GoPay",
+                "text": "Kode verifikasi GoPay Anda adalah 934140",
+                "postTime": 1777946000000,
+            },
+        ]
+    }
+    otp_cfg = {"package_filters": ["com.whatsapp"], "keywords": ["gopay", "kode"]}
+    events = phone_worker._extract_otp_events(payload, otp_cfg, now=1777947001, engine="android_adb_dumpsys")
+    state = {
+        "last_fingerprint": events[0]["fingerprint"],
+        "last_code": events[0]["otp"],
+        "last_pushed_at": 1777947001,
+        "last_pushed_event_ts": events[0]["ts"],
+    }
+
+    selected = None
+    for event in events:
+        if not phone_worker._should_skip_event(
+            event,
+            state,
+            first_scan=False,
+            ignore_existing=True,
+            dedupe_window_s=180,
+        ):
+            selected = event
+            break
+
+    assert events[0]["otp"] == "399008"
+    assert selected["otp"] == "934140"
+
+
+def test_extract_otp_events_skip_recently_pushed_alternate_candidate():
+    payload = {
+        "statusBarNotifications": [
+            {
+                "packageName": "com.whatsapp",
+                "title": "GoPay",
+                "text": "Kode verifikasi GoPay Anda adalah 399008",
+                "postTime": 1777947000000,
+            },
+            {
+                "packageName": "com.whatsapp",
+                "title": "GoPay",
+                "text": "Kode verifikasi GoPay Anda adalah 934140",
+                "postTime": 1777946000000,
+            },
+        ]
+    }
+    otp_cfg = {"package_filters": ["com.whatsapp"], "keywords": ["gopay", "kode"]}
+    events = phone_worker._extract_otp_events(payload, otp_cfg, now=1777947001, engine="android_adb_dumpsys")
+    state = {
+        "last_fingerprint": events[0]["fingerprint"],
+        "last_code": events[0]["otp"],
+        "last_pushed_at": 1777947001,
+        "last_pushed_event_ts": events[0]["ts"],
+        "recent_push_history": [
+            {
+                "fingerprint": events[1]["fingerprint"],
+                "code": events[1]["otp"],
+                "pushed_at": 1777946990,
+            }
+        ],
+    }
+
+    selected = None
+    reasons = []
+    for event in events:
+        reason = phone_worker._should_skip_event(
+            event,
+            state,
+            first_scan=False,
+            ignore_existing=True,
+            dedupe_window_s=180,
+        )
+        reasons.append(reason)
+        if not reason:
+            selected = event
+            break
+
+    assert selected is None
+    assert reasons == ["duplicate_fingerprint", "duplicate_fingerprint"]
+
+
 def test_extract_otp_event_ignores_fixed_five_digit_whatsapp_notification_number():
     payload = {
         "statusBarNotifications": [
@@ -257,6 +351,17 @@ def test_log_entry_matches_otp_focus_trigger_from_requesting_and_legacy_marker()
     assert phone_worker._log_entry_matches_otp_focus_trigger(
         {"seq": 9, "line": "GOPAY_OTP_REQUEST path=output/gopay-otp.txt"},
         phone_worker._otp_focus_run_log_trigger_strings({}),
+    )
+
+
+def test_log_entry_does_not_match_otp_focus_trigger_after_submit():
+    assert not phone_worker._log_entry_matches_otp_focus_trigger(
+        {"seq": 10, "line": "[gopay] submitting WhatsApp OTP reference=abc attempt=1/3 otp=123456"},
+        phone_worker._otp_focus_run_log_trigger_strings({}),
+    )
+    assert not phone_worker._log_entry_matches_otp_focus_trigger(
+        {"seq": 11, "line": "[gopay] submitting WhatsApp OTP reference=abc attempt=1/3 otp=123456"},
+        ["gopay&&whatsapp&&otp"],
     )
 
 

@@ -475,9 +475,8 @@ def _provision_openai_auth_via_local_bundle(cfg: dict, fresh_cfg: dict) -> dict:
         billing["currency"] = str(plan_cfg["billing_currency"]).upper()
 
     mail_cfg = ab_cfg.setdefault("mail", {})
-    # IMAP/SMTP 字段已废弃（OTP 走 CF Email Worker → KV，见 cf_kv_otp_provider）；
-    # 这里只保留 catch_all_domain / catch_all_domains / auto_provision。
-    for key in ("catch_all_domain", "catch_all_domains", "auto_provision"):
+    # IMAP/SMTP 字段已废弃；这里透传当前支持的 mail 配置给 CTF-reg。
+    for key in ("source", "catch_all_domain", "catch_all_domains", "auto_provision", "hotmail_pool"):
         if key in auto_cfg and auto_cfg.get(key) not in (None, ""):
             mail_cfg[key] = auto_cfg.get(key)
     if isinstance(auto_cfg.get("mail"), dict):
@@ -534,7 +533,7 @@ logging.basicConfig(
 )
 
 cfg = Config.from_file(config_path)
-mail = MailProvider(cfg.mail.catch_all_domain)
+mail = MailProvider(cfg.mail)
 flow = AuthFlow(cfg)
 login_email = (os.getenv("LOCALAUTH_LOGIN_EMAIL") or "").strip()
 login_password = os.getenv("LOCALAUTH_LOGIN_PASSWORD", "")
@@ -5042,24 +5041,24 @@ def _safe_screenshot(page, path: str):
         pass
 
 
-def _fetch_openai_login_otp(target_email: str, timeout: int = 180) -> str:
-    """从 CF KV 取 OpenAI 登录 OTP（worker 已替代 IMAP→QQ 转发链路）。
+def _fetch_openai_login_otp(target_email: str, mail_cfg: dict | None = None, timeout: int = 180) -> str:
+    """按 mail 配置取 OpenAI 登录 OTP。
 
-    返回空串表示超时或 KV 路径配置缺失，调用方按需 fallback。
+    返回空串表示超时或对应路径配置缺失，调用方按需 fallback。
     """
     try:
-        from cf_kv_otp_provider import CloudflareKVOtpProvider
+        from mail_provider import MailProvider
     except ImportError as e:
-        _log(f"      [RT-OTP] cf_kv_otp_provider 不可用: {e}")
+        _log(f"      [RT-OTP] mail_provider 不可用: {e}")
         return ""
     try:
-        provider = CloudflareKVOtpProvider.from_env_or_secrets()
+        provider = MailProvider(mail_cfg or {})
         return provider.wait_for_otp(target_email, timeout=timeout)
     except TimeoutError:
-        _log(f"      [RT-OTP] CF KV 等 OTP 超时 {timeout}s")
+        _log(f"      [RT-OTP] 等 OTP 超时 {timeout}s")
         return ""
     except Exception as e:
-        _log(f"      [RT-OTP] CF KV 取 OTP 异常: {e}")
+        _log(f"      [RT-OTP] 取 OTP 异常: {e}")
         return ""
 
 
@@ -5105,7 +5104,7 @@ def _exchange_refresh_token_with_session(email: str, password: str, mail_cfg: di
       1. Camoufox 打开 Codex authorize URL
       2. 重定向到 auth.openai.com/log-in
       3. 填邮箱 → 继续 → 填密码 → 继续
-      4. 可能触发 Turnstile (Camoufox 自动过) / OTP (IMAP 取)
+      4. 可能触发 Turnstile (Camoufox 自动过) / OTP (按 mail 配置取)
       5. workspace/select (选择默认 workspace)
       6. 自动 authorize Codex client → localhost callback
       7. POST /oauth/token 换 refresh_token
@@ -5261,8 +5260,12 @@ def _exchange_refresh_token_with_session(email: str, password: str, mail_cfg: di
                     page.query_selector('input[autocomplete="one-time-code"]') or
                     page.query_selector('input[inputmode="numeric"]')):
                     if not otp_fetched:
-                        _log("      [RT] 检测到 OTP 页面，从 IMAP 取验证码 ...")
-                        otp_code = _fetch_openai_login_otp(target_email=email, timeout=180)
+                        _log("      [RT] 检测到 OTP 页面，按 mail 配置取验证码 ...")
+                        otp_code = _fetch_openai_login_otp(
+                            target_email=email,
+                            mail_cfg=mail_cfg,
+                            timeout=180,
+                        )
                         if not otp_code:
                             _log("      [RT] OTP 获取超时")
                             return ""
@@ -5987,7 +5990,7 @@ def _paypal_browser_authorize(
                         _safe_screenshot(page, "/tmp/paypal_push_timeout.png")
                         raise RuntimeError("PayPal 手机推送 5 分钟未确认")
                 else:
-                    # 邮件 OTP 模式：等 IMAP 收码（3 分钟，PayPal 有时要 2 分钟才发）
+                    # 邮件 OTP 模式：等邮件收码（3 分钟，PayPal 有时要 2 分钟才发）
                     _log("      [B5] 等待 PayPal 邮件 OTP (最长 180s) ...")
                     otp = _fetch_paypal_otp(paypal_cfg, timeout=180)
                     if not otp:
@@ -6657,7 +6660,7 @@ def _fetch_paypal_otp(paypal_cfg: dict, timeout: int = 90) -> str:
 
     前提：PayPal 账户绑定的邮箱（`paypal_cfg["email"]`）已迁移到 catch-all
     域名，PayPal 发的 OTP 邮件就会落进 otp-relay Worker 写到 KV。
-    若仍是 IMAP 邮箱（QQ 等），KV 里取不到，会超时返回空串。
+    若仍是非 CF 邮箱且未接到对应 mail provider，这里会超时返回空串。
     """
     target = (paypal_cfg.get("email") or "").strip()
     if not target:
@@ -8670,7 +8673,7 @@ def run(
             except Exception:
                 _password = ""
 
-            # 加载 CTF-reg/config.paypal-proxy.json 里的 mail 配置（供 IMAP 取 OTP）
+            # 加载 CTF-reg/config.paypal-proxy.json 里的 mail 配置（供登录链路取 OTP）
             _mail_cfg = {}
             reg_cfg_path = _os.path.join(
                 _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),

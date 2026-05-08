@@ -1,0 +1,5 @@
+# format: email----api_url
+# recommend using `type=html`, because some orders do not return
+# `verification_code` in the default JSON payload.
+alpha-account@hotmail.com----https://mailapi.icu/key?type=html&orderNo=YOUR_ORDER_NO_001
+bravo-account@hotmail.com----https://mailapi.icu/key?type=html&orderNo=YOUR_ORDER_NO_002
