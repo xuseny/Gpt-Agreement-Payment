@@ -8,14 +8,24 @@ export interface PreflightLogEntry {
   message: string;
 }
 
-const REQUIRED_PREFLIGHT_BY_STEP: Record<number, string[]> = {
-  1: [],
-  2: ["system"],
-  3: ["system"],
-  4: ["system", "cloudflare"],
-  5: ["system", "cloudflare", "cloudflare_kv"],
-  6: ["system", "cloudflare", "cloudflare_kv", "proxy"],
-};
+function otpSource(answers: Record<string, any>): string {
+  return String(answers.cloudflare_kv?.source || "cf_kv").trim().toLowerCase();
+}
+
+function requiredPreflightByStep(step: number, answers: Record<string, any>): string[] {
+  const source = otpSource(answers);
+  const hotmail = source === "hotmail_pool";
+  const baseCloudflare = hotmail ? [] : ["cloudflare"];
+  const table: Record<number, string[]> = {
+    1: [],
+    2: ["system"],
+    3: ["system"],
+    4: ["system"],
+    5: ["system", ...baseCloudflare, "cloudflare_kv"],
+    6: ["system", ...baseCloudflare, "cloudflare_kv", "proxy"],
+  };
+  return table[step] ?? [];
+}
 
 export const useWizardStore = defineStore("wizard", {
   state: () => ({
@@ -42,7 +52,7 @@ export const useWizardStore = defineStore("wizard", {
       this.currentStep = n;
     },
     isStepUnlocked(n: number): boolean {
-      const required = REQUIRED_PREFLIGHT_BY_STEP[n] ?? [];
+      const required = requiredPreflightByStep(n, this.answers);
       return required.every((name) => this.preflight[name]?.status === "ok");
     },
     isStepHidden(n: number): boolean {

@@ -5,6 +5,11 @@ from . import settings as s
 from .db import get_db
 
 
+DEFAULT_HOTMAIL_POOL_PATH = "./hotmail-pool.local.txt"
+DEFAULT_HOTMAIL_POOL_STATE_PATH = "../output/hotmail-pool-state.json"
+DEFAULT_HOTMAIL_POOL_DELIMITER = "----"
+
+
 def _deep_merge(dst: dict, src: dict) -> dict:
     for k, v in src.items():
         if isinstance(v, dict) and isinstance(dst.get(k), dict):
@@ -33,6 +38,21 @@ def _manual_proxy_urls(proxy: dict) -> list[str]:
     else:
         values = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     return [str(item).strip() for item in values if str(item).strip()]
+
+
+def _clean_lines(value: str) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    return "\n".join(line.rstrip() for line in text.split("\n")).strip()
+
+
+def _resolve_reg_relative(path: str) -> Path:
+    p = Path(str(path or "").strip() or DEFAULT_HOTMAIL_POOL_PATH)
+    return p if p.is_absolute() else (s.REG_CONFIG_PATH.parent / p)
+
+
+def _email_otp_answers(answers: dict) -> dict:
+    otp = answers.get("cloudflare_kv") if isinstance(answers.get("cloudflare_kv"), dict) else {}
+    return dict(otp or {})
 
 
 def _project_pay(answers: dict) -> dict:
@@ -132,15 +152,34 @@ def _project_reg(answers: dict) -> dict:
     """Map flat wizard answers onto CTF-reg config schema."""
     out: dict = {}
     pm = _payment_method(answers)
-    # mail.catch_all_domain(s) 来自 Step03 Cloudflare 的 zone_names
-    # IMAP 字段（imap_server/port/email/auth_code）已彻底删除——OTP 走
-    # CF Email Worker → KV，凭证存 SQLite runtime_meta[secrets]。
-    zones = (answers.get("cloudflare") or {}).get("zone_names") or []
-    if zones:
+    otp = _email_otp_answers(answers)
+    otp_source = str(otp.get("source") or "cf_kv").strip().lower()
+    if otp_source == "hotmail_pool":
         out["mail"] = {
-            "catch_all_domain": zones[0],
-            "catch_all_domains": list(zones),
+            "source": "hotmail_pool",
+            "catch_all_domain": "",
+            "catch_all_domains": [],
+            "hotmail_pool": {
+                "enabled": True,
+                "path": str(otp.get("pool_path") or DEFAULT_HOTMAIL_POOL_PATH),
+                "state_path": str(otp.get("state_path") or DEFAULT_HOTMAIL_POOL_STATE_PATH),
+                "delimiter": str(otp.get("delimiter") or DEFAULT_HOTMAIL_POOL_DELIMITER),
+                "poll_interval_s": float(otp.get("poll_interval_s") or 3),
+                "request_timeout_s": float(otp.get("request_timeout_s") or 20),
+                "issued_after_grace_s": float(otp.get("issued_after_grace_s") or 45),
+            },
         }
+    else:
+        # mail.catch_all_domain(s) 来自 Step03 Cloudflare 的 zone_names
+        # IMAP 字段（imap_server/port/email/auth_code）已彻底删除——OTP 走
+        # CF Email Worker → KV，凭证存 SQLite runtime_meta[secrets]。
+        zones = (answers.get("cloudflare") or {}).get("zone_names") or []
+        if zones:
+            out["mail"] = {
+                "source": "cf_kv",
+                "catch_all_domain": zones[0],
+                "catch_all_domains": list(zones),
+            }
     if "card" in answers and pm in ("card", "both"):
         out["card"] = {k: answers["card"].get(k, "") for k in ("number", "cvc", "exp_month", "exp_year")}
     if "billing" in answers:
@@ -203,8 +242,21 @@ def _write_secrets(answers: dict) -> str | None:
     return "sqlite:runtime_meta/secrets"
 
 
+def _write_hotmail_pool(answers: dict) -> str | None:
+    otp = _email_otp_answers(answers)
+    if str(otp.get("source") or "cf_kv").strip().lower() != "hotmail_pool":
+        return None
+    pool_text = _clean_lines(otp.get("pool_text") or "")
+    if not pool_text:
+        return None
+    pool_path = _resolve_reg_relative(str(otp.get("pool_path") or DEFAULT_HOTMAIL_POOL_PATH))
+    pool_path.parent.mkdir(parents=True, exist_ok=True)
+    pool_path.write_text(pool_text + "\n", encoding="utf-8")
+    return str(pool_path)
+
+
 def write_configs(answers: dict) -> dict:
-    """Returns {pay_path, reg_path, secrets_path, backups: [path, ...]}."""
+    """Returns {pay_path, reg_path, secrets_path, extra_paths, backups: [path, ...]}."""
     pay_skeleton = json.loads(s.PAY_EXAMPLE_PATH.read_text(encoding="utf-8"))
     reg_skeleton = json.loads(s.REG_EXAMPLE_PATH.read_text(encoding="utf-8"))
 
@@ -223,6 +275,13 @@ def write_configs(answers: dict) -> dict:
         b = _backup(p)
         if b:
             backups.append(str(b))
+    hotmail_pool_path = _resolve_reg_relative(
+        str(_email_otp_answers(answers).get("pool_path") or DEFAULT_HOTMAIL_POOL_PATH)
+    )
+    if str(_email_otp_answers(answers).get("source") or "cf_kv").strip().lower() == "hotmail_pool":
+        b = _backup(hotmail_pool_path)
+        if b:
+            backups.append(str(b))
 
     s.PAY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     s.REG_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -230,10 +289,13 @@ def write_configs(answers: dict) -> dict:
     s.REG_CONFIG_PATH.write_text(json.dumps(reg, ensure_ascii=False, indent=2), encoding="utf-8")
 
     secrets_path = _write_secrets(answers)
+    hotmail_pool_written = _write_hotmail_pool(answers)
+    extra_paths = [path for path in (hotmail_pool_written,) if path]
 
     return {
         "pay_path": str(s.PAY_CONFIG_PATH),
         "reg_path": str(s.REG_CONFIG_PATH),
         "secrets_path": secrets_path,
+        "extra_paths": extra_paths,
         "backups": backups,
     }

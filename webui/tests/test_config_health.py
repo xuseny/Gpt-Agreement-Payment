@@ -92,3 +92,61 @@ def test_run_start_blocked_by_config_health(client, tmp_path, monkeypatch):
     assert "message" in detail
     assert "Cloudflare" in detail["message"] or "cloudflare" in detail["message"].lower()
     assert detail["health"]["blocking"]
+
+
+def test_config_health_ok_with_hotmail_pool_without_cloudflare_secrets(client, tmp_path, monkeypatch):
+    _login(client)
+    pay_path, reg_path = _seed_configs(tmp_path, monkeypatch)
+
+    reg_path.write_text(json.dumps({
+        "mail": {
+            "source": "hotmail_pool",
+            "hotmail_pool": {
+                "enabled": True,
+                "path": "./hotmail-pool.local.txt",
+                "state_path": "../output/hotmail-pool-state.json",
+                "delimiter": "----",
+            },
+        },
+        "captcha": {"client_key": "captcha-key"},
+    }), encoding="utf-8")
+    (reg_path.parent / "hotmail-pool.local.txt").write_text(
+        "alpha@hotmail.com----https://mailapi.icu/key?type=html&orderNo=1\n",
+        encoding="utf-8",
+    )
+
+    db = get_db()
+    db.clear_runtime_data()
+
+    r = client.post("/api/config/health", json={"mode": "single", "paypal": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert not body["blocking"]
+
+
+def test_config_health_fails_when_hotmail_pool_file_missing(client, tmp_path, monkeypatch):
+    _login(client)
+    pay_path, reg_path = _seed_configs(tmp_path, monkeypatch)
+
+    reg_path.write_text(json.dumps({
+        "mail": {
+            "source": "hotmail_pool",
+            "hotmail_pool": {
+                "enabled": True,
+                "path": "./hotmail-pool.local.txt",
+                "delimiter": "----",
+            },
+        },
+        "captcha": {"client_key": "captcha-key"},
+    }), encoding="utf-8")
+
+    db = get_db()
+    db.clear_runtime_data()
+
+    r = client.post("/api/config/health", json={"mode": "single", "paypal": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    names = {c["name"] for c in body["blocking"]}
+    assert "cloudflare_kv_secrets" in names

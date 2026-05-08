@@ -41,11 +41,13 @@ watch(() => store.currentStep, async () => {
 const steps = computed(() => {
   const pm = (store.answers.payment as any)?.method;
   const paySlotTitle = pm === "gopay" ? "GOPAY" : "PAYPAL";
+  const otpSource = (store.answers.cloudflare_kv as any)?.source;
+  const otpSlotTitle = otpSource === "hotmail_pool" ? "HOTMAIL" : "CF KV";
   return [
     { n: 1, title: "模式", phase: "基础" },
     { n: 2, title: "系统", phase: "基础" },
     { n: 3, title: "CF", phase: "基础" },
-    { n: 4, title: "CF KV", phase: "基础" },
+    { n: 4, title: otpSlotTitle, phase: "基础" },
     { n: 5, title: "代理", phase: "基础" },
     { n: 6, title: paySlotTitle, phase: "支付" },
     { n: 7, title: "卡片", phase: "支付" },

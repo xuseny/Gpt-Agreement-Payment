@@ -21,6 +21,7 @@
       <div class="export-paths">
         <div class="export-path">{{ result.pay_path }}</div>
         <div class="export-path">{{ result.reg_path }}</div>
+        <div v-for="path in result.extra_paths || []" :key="path" class="export-path">{{ path }}</div>
         <div v-if="result.backups?.length" class="export-path" style="color: var(--fg-tertiary)">
           备份：{{ result.backups.join(", ") }}
         </div>
@@ -47,6 +48,7 @@ const loading = ref(false);
 interface ExportResult {
   pay_path: string;
   reg_path: string;
+  extra_paths?: string[];
   backups: string[];
 }
 const result = ref<ExportResult | null>(null);

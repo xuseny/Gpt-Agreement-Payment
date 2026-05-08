@@ -123,6 +123,39 @@ def _effective_cloudflare_secret_presence() -> dict[str, bool]:
     }
 
 
+def _mail_cfg(reg_cfg: dict) -> dict:
+    return reg_cfg.get("mail") if isinstance(reg_cfg.get("mail"), dict) else {}
+
+
+def _mail_source(reg_cfg: dict) -> str:
+    mail = _mail_cfg(reg_cfg)
+    return _text(mail.get("source")).lower() or "cf_kv"
+
+
+def _resolve_reg_relative(reg_path: Path, raw: str) -> Path:
+    p = Path(_text(raw))
+    if p.is_absolute():
+        return p
+    return (reg_path.parent / p).resolve()
+
+
+def _hotmail_pool_has_entries(path: Path, delimiter: str) -> bool:
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except Exception:
+        return False
+    delim = delimiter or "----"
+    for line in raw.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        item = line.strip()
+        if not item or item.startswith("#"):
+            continue
+        if delim in item:
+            left, right = item.split(delim, 1)
+            if _text(left) and _text(right):
+                return True
+    return False
+
+
 def _missing_paths(obj: dict, paths: list[str]) -> list[str]:
     return [p for p in paths if _is_missing(_get(obj, p))]
 
@@ -188,7 +221,7 @@ def _check_config_files(checks: list[dict], req: dict) -> tuple[dict, dict, Path
 
     reg_path = _resolve_reg_config_path(pay_cfg)
     reg_cfg: dict = {}
-    if _requires_registration(req):
+    if _requires_registration(req) or _requires_email_otp(req):
         reg_cfg, reg_err = _load_json(reg_path)
         if reg_err:
             _check(
@@ -212,7 +245,53 @@ def _check_config_files(checks: list[dict], req: dict) -> tuple[dict, dict, Path
     return pay_cfg, reg_cfg, reg_path
 
 
-def _check_cloudflare_kv(checks: list[dict], req: dict) -> None:
+def _check_cloudflare_kv(checks: list[dict], req: dict, reg_cfg: dict, reg_path: Path) -> None:
+    if _mail_source(reg_cfg) == "hotmail_pool":
+        mail = _mail_cfg(reg_cfg)
+        hp = mail.get("hotmail_pool") if isinstance(mail.get("hotmail_pool"), dict) else {}
+        pool_path_raw = _text(hp.get("path"))
+        if not pool_path_raw:
+            _check(
+                checks,
+                "cloudflare_kv_secrets",
+                "fail",
+                "Hotmail 邮箱池模式已启用，但未配置池文件路径",
+                missing=["mail.hotmail_pool.path"],
+                action="在 WebUI 的 OTP 接收步骤填写 Hotmail 邮箱池并重新导出",
+            )
+            return
+        pool_path = _resolve_reg_relative(reg_path, pool_path_raw)
+        delimiter = _text(hp.get("delimiter")) or "----"
+        if not pool_path.exists():
+            _check(
+                checks,
+                "cloudflare_kv_secrets",
+                "fail",
+                "Hotmail 邮箱池文件不存在",
+                missing=[str(pool_path)],
+                action="在 WebUI 的 OTP 接收步骤重新导出，确认池文件已写到服务器",
+            )
+            return
+        if not _hotmail_pool_has_entries(pool_path, delimiter):
+            _check(
+                checks,
+                "cloudflare_kv_secrets",
+                "fail",
+                "Hotmail 邮箱池文件为空或格式不正确",
+                missing=[f"有效的 `邮箱{delimiter}收件api` 行"],
+                action="在 WebUI 的 OTP 接收步骤粘贴邮箱池内容后重新导出",
+            )
+            return
+        _check(
+            checks,
+            "cloudflare_kv_secrets",
+            "ok",
+            "邮箱 OTP 已切到 Hotmail 邮箱池，无需 Cloudflare KV 凭证",
+            details=str(pool_path),
+            blocking=False,
+        )
+        return
+
     presence = _effective_cloudflare_secret_presence()
     missing = [name for name, ok in presence.items() if not ok]
     if not missing:
@@ -250,7 +329,42 @@ def _check_cloudflare_kv(checks: list[dict], req: dict) -> None:
 def _check_registration_config(checks: list[dict], req: dict, reg_cfg: dict) -> None:
     if not _requires_registration(req):
         return
-    mail = reg_cfg.get("mail") if isinstance(reg_cfg.get("mail"), dict) else {}
+    mail = _mail_cfg(reg_cfg)
+    if _mail_source(reg_cfg) == "hotmail_pool":
+        hp = mail.get("hotmail_pool") if isinstance(mail.get("hotmail_pool"), dict) else {}
+        missing = []
+        if _is_missing(hp.get("path"), allow_example=True):
+            missing.append("mail.hotmail_pool.path")
+        if missing:
+            _check(
+                checks,
+                "mail_domains",
+                "fail",
+                "注册已切到 Hotmail 邮箱池，但池文件路径未配置",
+                missing=missing,
+                action="在 WebUI 的 OTP 接收步骤填写 Hotmail 池路径后重新导出",
+            )
+        else:
+            _check(
+                checks,
+                "mail_domains",
+                "ok",
+                "注册 Hotmail 邮箱池已配置",
+                blocking=False,
+            )
+        captcha_key = _text(_get(reg_cfg, "captcha.client_key"))
+        if not captcha_key:
+            _check(
+                checks,
+                "captcha",
+                "warn",
+                "注册 captcha client_key 未配置；遇到验证码时可能失败",
+                missing=["captcha.client_key"],
+                blocking=False,
+                action="如近期注册触发验证码，先在配置向导补打码平台配置",
+            )
+        return
+
     domains = mail.get("catch_all_domains")
     has_domain = False
     if isinstance(domains, list):
@@ -505,7 +619,7 @@ def build_config_health(req: dict | None = None) -> dict:
 
     pay_cfg, reg_cfg, reg_path = _check_config_files(checks, req)
     if pay_cfg:
-        _check_cloudflare_kv(checks, req)
+        _check_cloudflare_kv(checks, req, reg_cfg, reg_path)
         _check_registration_config(checks, req, reg_cfg)
         _check_payment_config(checks, req, pay_cfg)
         _check_pay_only_inventory(checks, req, pay_cfg)

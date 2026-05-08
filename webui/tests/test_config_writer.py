@@ -50,6 +50,7 @@ def test_export_writes_two_files(client, tmp_path, monkeypatch):
     assert pay["paypal"]["email"] == "you@example.com"
     assert pay["captcha"]["api_key"] == "k"
     # mail.catch_all_domain(s) 来自 cloudflare zone_names；不再有 imap 字段
+    assert reg["mail"]["source"] == "cf_kv"
     assert reg["mail"]["catch_all_domain"] == "a.com"
     assert reg["mail"]["catch_all_domains"] == ["a.com", "b.com"]
     assert "imap_server" not in reg["mail"]
@@ -64,6 +65,45 @@ def test_export_writes_two_files(client, tmp_path, monkeypatch):
     assert cf["account_id"] == "acct-123"
     assert cf["otp_kv_namespace_id"] == "kv-456"
     assert cf["otp_worker_name"] == "otp-relay"
+
+
+def test_export_writes_hotmail_pool_file(client, tmp_path, monkeypatch):
+    _login(client)
+    _seed(tmp_path, monkeypatch)
+
+    answers = {
+        "cloudflare_kv": {
+            "source": "hotmail_pool",
+            "pool_path": "./hotmail-pool.local.txt",
+            "state_path": "../output/hotmail-pool-state.json",
+            "delimiter": "----",
+            "pool_text": (
+                "alpha@hotmail.com----https://mailapi.icu/key?type=html&orderNo=1\n"
+                "beta@hotmail.com----https://mailapi.icu/key?type=html&orderNo=2\n"
+            ),
+            "poll_interval_s": "3",
+            "request_timeout_s": "20",
+            "issued_after_grace_s": "45",
+        },
+    }
+    r = client.post("/api/config/export", json={"answers": answers})
+    assert r.status_code == 200
+    body = r.json()
+
+    reg = json.loads((tmp_path / "CTF-reg" / "config.paypal-proxy.json").read_text())
+    assert reg["mail"]["source"] == "hotmail_pool"
+    assert reg["mail"]["hotmail_pool"]["enabled"] is True
+    assert reg["mail"]["hotmail_pool"]["path"] == "./hotmail-pool.local.txt"
+    assert reg["mail"]["hotmail_pool"]["state_path"] == "../output/hotmail-pool-state.json"
+    assert reg["mail"]["hotmail_pool"]["delimiter"] == "----"
+    assert reg["mail"]["hotmail_pool"]["poll_interval_s"] == 3.0
+    assert reg["mail"]["hotmail_pool"]["request_timeout_s"] == 20.0
+    assert reg["mail"]["hotmail_pool"]["issued_after_grace_s"] == 45.0
+
+    pool_path = tmp_path / "CTF-reg" / "hotmail-pool.local.txt"
+    assert pool_path.exists()
+    assert "alpha@hotmail.com----https://mailapi.icu/key?type=html&orderNo=1" in pool_path.read_text(encoding="utf-8")
+    assert str(pool_path) in (body.get("extra_paths") or [])
 
 
 def test_export_backs_up_existing(client, tmp_path, monkeypatch):
